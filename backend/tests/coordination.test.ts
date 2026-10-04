@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { Types } from 'mongoose'
+import type { TicketRecord } from '../src/modules/tickets/ticket.model.js'
 
 process.env.MONGODB_URI = 'mongodb://127.0.0.1:27018'
 process.env.SESSION_SECRET = 'coordination-test-secret-with-at-least-32-characters'
@@ -19,6 +20,15 @@ const result = {
   summary: 'Payroll is unavailable.',
   relevantTeams: [{ teamId, reason: 'IT maintains the application.' }],
   stakeholderUserIds: [userId],
+}
+const previousTicket: TicketRecord = {
+  _id: new Types.ObjectId(ticketId), title: 'Payroll unavailable', description: 'Payroll access is interrupted.',
+  category: 'software', priority: 'medium', status: 'open', creatorId: new Types.ObjectId(userId), assigneeId: null,
+  createdAt: new Date('2026-10-02T08:00:00.000Z'), updatedAt: new Date('2026-10-02T08:00:00.000Z'),
+  coordination: {
+    summary: 'Previous payroll analysis.', relevantTeams: [{ teamId: new Types.ObjectId(teamId), reason: 'IT maintains payroll.' }],
+    stakeholderUserIds: [new Types.ObjectId(userId)], analyzedAt: new Date('2026-10-02T08:01:00.000Z'),
+  },
 }
 
 test('agent client sends only the ticket ID and validates the result', async (t) => {
@@ -47,15 +57,15 @@ test('agent client rejects failed, malformed, and mismatched responses', async (
 
 test('coordination saves MongoDB references only for the analyzed ticket version', async (t) => {
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify(result)))
-  const save = t.mock.method(TicketModel, 'updateOne', async () => ({ modifiedCount: 1 }))
-  const updatedAt = new Date('2026-10-02T08:00:00.000Z')
+  const save = t.mock.method(TicketModel, 'findOneAndUpdate', () => ({ lean: async () => previousTicket }))
+  const updatedAt = previousTicket.updatedAt
 
-  await coordinateTicket(ticketId, updatedAt)
+  assert.deepEqual(await coordinateTicket(ticketId, updatedAt), { result, saved: true })
 
   const [filter, update, options] = save.mock.calls[0]!.arguments as unknown as [
     { _id: Types.ObjectId; updatedAt: Date },
     { $set: { coordination: { summary: string; relevantTeams: { teamId: Types.ObjectId }[]; stakeholderUserIds: Types.ObjectId[]; analyzedAt: Date } } },
-    { timestamps: boolean; runValidators: boolean },
+    { timestamps: boolean; runValidators: boolean; returnDocument: string },
   ]
   assert.equal(String(filter._id), ticketId)
   assert.equal(filter.updatedAt, updatedAt)
@@ -63,7 +73,7 @@ test('coordination saves MongoDB references only for the analyzed ticket version
   assert.equal(String(update.$set.coordination.relevantTeams[0]!.teamId), teamId)
   assert.equal(String(update.$set.coordination.stakeholderUserIds[0]), userId)
   assert.ok(update.$set.coordination.analyzedAt instanceof Date)
-  assert.deepEqual(options, { runValidators: true, timestamps: false })
+  assert.deepEqual(options, { runValidators: true, timestamps: false, returnDocument: 'before' })
 })
 
 test('background scheduling returns before the agent finishes', async (t) => {
@@ -72,7 +82,7 @@ test('background scheduling returns before the agent finishes', async (t) => {
   t.mock.method(globalThis, 'fetch', () => pending)
   let saved!: () => void
   const completed = new Promise<void>((resolve) => { saved = resolve })
-  const save = t.mock.method(TicketModel, 'updateOne', async () => { saved(); return { modifiedCount: 1 } })
+  const save = t.mock.method(TicketModel, 'findOneAndUpdate', () => ({ lean: async () => { saved(); return previousTicket } }))
 
   assert.equal(scheduleTicketCoordination({ _id: new Types.ObjectId(ticketId), updatedAt: new Date() }), undefined)
   assert.equal(save.mock.callCount(), 0)

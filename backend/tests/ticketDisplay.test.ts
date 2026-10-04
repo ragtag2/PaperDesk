@@ -25,7 +25,7 @@ const ticket: TicketRecord = {
 }
 const actor = { userId: String(creatorId), role: 'employee' as const }
 
-test('employee ticket detail includes only coordination names and retains ownership filtering', async (t) => {
+test('employee ticket detail resolves coordination names and filters by owner or stakeholder', async (t) => {
   const find = t.mock.method(TicketModel, 'findOne', () => ({ lean: async () => ticket }))
   const users = t.mock.method(UserModel, 'find', () => ({ select: (fields: string) => {
     assert.equal(fields, 'name')
@@ -38,7 +38,10 @@ test('employee ticket detail includes only coordination names and retains owners
 
   const result = await getTicket(String(ticket._id), actor)
 
-  assert.deepEqual(find.mock.calls[0]!.arguments[0], { _id: ticket._id, creatorId: String(creatorId) })
+  assert.deepEqual(find.mock.calls[0]!.arguments[0], {
+    _id: ticket._id,
+    $or: [{ creatorId: actor.userId }, { 'coordination.stakeholderUserIds': actor.userId }],
+  })
   assert.deepEqual(users.mock.calls[0]!.arguments[0], { _id: { $in: [String(creatorId), String(stakeholderId)] } })
   assert.deepEqual(teams.mock.calls[0]!.arguments[0], { _id: { $in: [String(teamId)] } })
   assert.deepEqual(result!.coordination?.relevantTeams, [{ teamId: String(teamId), name: 'IT', reason: 'IT maintains application access.' }])
