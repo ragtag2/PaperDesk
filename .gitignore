@@ -14,3 +14,7 @@ paperdesk-images.tar
 .env.*
 !.env.example
 agents/runs/
+AGENTS.md
+API_CONTRACT.md
+mvp.docx
+WORK_LOG.md
