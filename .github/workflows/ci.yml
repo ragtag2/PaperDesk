@@ -104,3 +104,59 @@ jobs:
 
       - name: Run agent tests
         run: python -m unittest discover -s agents/tests -v
+    images:
+    name: Publish ARM64 images
+    needs: [frontend, backend, agent]
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish frontend
+        uses: docker/build-push-action@v7
+        with:
+          context: ./frontend
+          platforms: linux/arm64
+          push: true
+          tags: ghcr.io/ragtag2/paperdesk-frontend:sha-${{ github.sha }}
+          build-args: |
+            VITE_API_BASE_URL=${{ vars.VITE_API_BASE_URL }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Publish backend
+        uses: docker/build-push-action@v7
+        with:
+          context: ./backend
+          platforms: linux/arm64
+          push: true
+          tags: ghcr.io/ragtag2/paperdesk-backend:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Publish agent
+        uses: docker/build-push-action@v7
+        with:
+          context: ./agents
+          platforms: linux/arm64
+          push: true
+          tags: ghcr.io/ragtag2/paperdesk-agent:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
