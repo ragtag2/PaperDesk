@@ -52,7 +52,7 @@ class ApiTests(unittest.TestCase):
                 "AGENT_MODEL": "openai:test-model",
                 "OPENAI_API_KEY": "test-placeholder",
             },
-        ), patch("agents.main.MongoClient") as mongo_client:
+        ), patch("agents.main.create_mongo_client") as mongo_client:
             with TestClient(create_app()) as client:
                 self.assertEqual(client.get("/docs").status_code, 200)
             mongo_client.return_value.close.assert_called_once()

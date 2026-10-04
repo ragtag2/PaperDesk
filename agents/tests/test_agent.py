@@ -130,6 +130,7 @@ class AgentTests(unittest.TestCase):
         first = coordinator.analyze(TICKET_ID)
         self.database.get_ticket.return_value = {
             "_id": TICKET_ID,
+            "title": "Payroll approval follow-up",
             "description": "The application is restored; Finance needs to retry approval.",
             "coordination": first.model_dump(),
         }
