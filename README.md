@@ -1,36 +1,35 @@
-# Ticket submission project
+# Paperdesk
 
-Product requirements are in [`mvp.docx`](mvp.docx). The [API contract](API_CONTRACT.md) defines the frontend/backend agreement. The React app lives in [`frontend/`](frontend/) and the Express API in [`backend/`](backend/). Each folder has its own README and package commands.
+Paperdesk is a web application for reporting and managing internal support issues. Employees submit tickets, support staff assign and resolve them, and admins manage users, roles, and teams.
 
-```sh
-cd frontend
-npm install
-npm run dev
+The app includes ticket filtering, profile settings, and notifications about ticket involvement and resolution. An optional AI coordination service identifies teams and people relevant to an incident.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Frontend["Frontend (React)"] <-->|REST API| Backend["Backend (Express)"]
+    Backend <-->|Application data| Database[(MongoDB Atlas)]
+    Backend -.->|Optional analysis| Agent["Python coordination agent"]
+    Agent -->|Read ticket and team data| Database
 ```
 
-In this Windows PowerShell environment, use `npm.cmd` instead of `npm` if script execution is disabled.
+The frontend communicates with the backend using a session cookie. The backend handles permissions and database operations. When coordination is enabled, it calls the Python agent in the background and saves the returned summary, relevant teams, and stakeholders.
 
-The root `AGENTS.md` contains shared guidance; `frontend/AGENTS.md` and `backend/AGENTS.md` contain area-specific guidance. `WORK_LOG.md` records coding requests and completed code changes.
+## Project parts
 
-## Package images for the Raspberry Pi
+| Part | Technology | Responsibility |
+| --- | --- | --- |
+| [Frontend](frontend/README.md) | React, TypeScript, Vite | Browser interface for login, tickets, notifications, profiles, and administration. |
+| [Backend](backend/README.md) | Express, TypeScript, Node.js | REST API, authentication, permissions, ticket management, and notifications. |
+| [Coordination agent](agents/README.md) | Python, FastAPI, LangChain | Optional AI analysis that reads incident context and suggests relevant teams and people. |
+| [Deployment](k8s/README.md) | Docker images, Kubernetes manifests, k3s | Configuration for running and exposing the frontend and backend on the Raspberry Pi. |
+| Database | MongoDB Atlas | Stores users, teams, tickets, sessions, and notifications. |
 
-The two Dockerfiles build Linux ARM64 images. The frontend image serves the Vite build through Nginx, including direct visits to React routes. The backend image runs the compiled Express app. Build on the Windows PC with Docker Desktop running. In the commands below, replace `<PI_IP>` with the Pi's LAN address (`hostname -I` on the Pi). Port `30080` is the planned API NodePort for the next deployment step.
+Each component's linked README contains its setup instructions.
 
-```powershell
-$piIp = '172.20.10.2'
-docker buildx build --platform linux/arm64 --load -t paperdesk-backend:pi ./backend
-docker buildx build --platform linux/arm64 --load --build-arg "VITE_API_BASE_URL=http://${piIp}:30080" -t paperdesk-frontend:pi ./frontend
-docker save --platform linux/arm64 -o paperdesk-images.tar paperdesk-backend:pi paperdesk-frontend:pi
-scp .\paperdesk-images.tar "rayen@${piIp}:~/"
-```
+## Current deployment
 
-The frontend API URL is embedded in its JavaScript at build time. Rebuild that image if the API address changes. The Docker build excludes local environment files. On the Pi, import the images into k3s:
+The frontend and backend run as ARM64 containers on a Raspberry Pi 4 through k3s. Nginx serves the frontend, and Node.js runs the backend. MongoDB Atlas is hosted separately. The optional Python agent is not currently deployed on the Pi.
 
-```sh
-sudo k3s ctr -n k8s.io images import ~/paperdesk-images.tar
-sudo k3s ctr -n k8s.io images list | grep paperdesk
-```
-
-The Kubernetes Deployments and Services are in `k8s/paperdesk.yaml`. The backend needs `MONGODB_URI`, `SESSION_SECRET`, and `FRONTEND_ORIGIN` at runtime; for the planned frontend NodePort, `FRONTEND_ORIGIN` is `http://<PI_IP>:30081`. Keep the same `SESSION_SECRET` across restarts.
-
-The first local-network deployment is in [`k8s/`](k8s/README.md).
+The current manifests expose the frontend on port `30081` and the API on port `30080`. See the [deployment guide](k8s/README.md) for configuration and deployment steps.
