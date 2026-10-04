@@ -160,3 +160,57 @@ jobs:
           tags: ghcr.io/ragtag2/paperdesk-agent:sha-${{ github.sha }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+  deploy:
+    name: Deploy to Pi
+    needs: images
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: [self-hosted, linux, ARM64, paperdesk-pi]
+    timeout-minutes: 15
+
+    concurrency:
+      group: paperdesk-production
+      cancel-in-progress: false
+
+    env:
+      KUBECONFIG: /home/rayen/.kube/paperdesk-ci.yaml
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+
+      - name: Deploy published images
+        shell: bash
+        run: |
+          latest_sha="$(git ls-remote origin refs/heads/main | cut -f1)"
+          if [[ "$GITHUB_SHA" != "$latest_sha" ]]; then
+            echo "Skipping a commit superseded on main."
+            exit 0
+          fi
+
+          deploy_dir="$(mktemp -d "$RUNNER_TEMP/paperdesk.XXXXXX")"
+          cp k8s/paperdesk.yaml k8s/agent.yaml "$deploy_dir/"
+
+          cat > "$deploy_dir/kustomization.yaml" <<EOF
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          resources:
+            - paperdesk.yaml
+            - agent.yaml
+          images:
+            - name: ghcr.io/ragtag2/paperdesk-frontend
+              newTag: sha-${GITHUB_SHA}
+            - name: ghcr.io/ragtag2/paperdesk-backend
+              newTag: sha-${GITHUB_SHA}
+            - name: ghcr.io/ragtag2/paperdesk-agent
+              newTag: sha-${GITHUB_SHA}
+          EOF
+
+          kubectl apply -k "$deploy_dir"
+
+          for service in agent backend frontend; do
+            kubectl rollout status \
+              -n paperdesk deployment/paperdesk-$service \
+              --timeout=240s
+          done
+
+          kubectl get pods -n paperdesk

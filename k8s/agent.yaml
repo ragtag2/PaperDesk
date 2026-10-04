@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: paperdesk-agent-reports
+  namespace: paperdesk
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: paperdesk-agent
+  namespace: paperdesk
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: paperdesk-agent
+  template:
+    metadata:
+      labels:
+        app: paperdesk-agent
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull
+      securityContext:
+        fsGroup: 10001
+      containers:
+        - name: agent
+          image: ghcr.io/ragtag2/paperdesk-agent:sha-f8f3222e7d250ae99750ba2a0ccbaeee2964527a
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: paperdesk-agent
+          env:
+            - name: MONGODB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: paperdesk-backend
+                  key: MONGODB_URI
+            - name: MONGODB_DB_NAME
+              value: paperdesk
+            - name: MONGODB_DNS_SERVERS
+              valueFrom:
+                secretKeyRef:
+                  name: paperdesk-backend
+                  key: MONGODB_DNS_SERVERS
+                  optional: true
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+          volumeMounts:
+            - name: reports
+              mountPath: /app/agents/runs
+      volumes:
+        - name: reports
+          persistentVolumeClaim:
+            claimName: paperdesk-agent-reports
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: paperdesk-agent
+  namespace: paperdesk
+spec:
+  type: ClusterIP
+  selector:
+    app: paperdesk-agent
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

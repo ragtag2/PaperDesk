@@ -12,11 +12,13 @@ spec:
     metadata:
       labels:
         app: paperdesk-backend
-    spec:
+    spec: 
+      imagePullSecrets:
+        - name: ghcr-pull
       containers:
         - name: backend
-          image: paperdesk-backend:pi
-          imagePullPolicy: Never
+          image: ghcr.io/ragtag2/paperdesk-backend:sha-f8f3222e7d250ae99750ba2a0ccbaeee2964527a
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 3000
@@ -30,6 +32,8 @@ spec:
               value: http://172.20.10.2:30081
             - name: TRUST_PROXY
               value: "0"
+            - name: AGENT_BASE_URL
+              value: http://paperdesk-agent:8000
           readinessProbe:
             tcpSocket:
               port: 3000
@@ -65,10 +69,12 @@ spec:
       labels:
         app: paperdesk-frontend
     spec:
+      imagePullSecrets:
+        - name: ghcr-pull
       containers:
         - name: frontend
-          image: paperdesk-frontend:pi
-          imagePullPolicy: Never
+          image: ghcr.io/ragtag2/paperdesk-frontend:sha-f8f3222e7d250ae99750ba2a0ccbaeee2964527a
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 80
