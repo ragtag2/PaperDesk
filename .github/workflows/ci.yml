@@ -82,7 +82,7 @@ jobs:
 
       - name: Run backend tests
         run: npm test
-    agent:
+  agent:
     name: Agent tests
     runs-on: ubuntu-24.04
     timeout-minutes: 10
