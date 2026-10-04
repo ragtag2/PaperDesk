@@ -1,0 +1,16 @@
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+frontend/.env.*.local
+backend/.env
+backend/node_modules/
+backend/dist/
+frontend/playwright-report/
+frontend/test-results/
+frontend/artifacts/
+*.tsbuildinfo
+paperdesk-images.tar
+.env
+.env.*
+!.env.example
+agents/runs/

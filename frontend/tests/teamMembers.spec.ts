@@ -1,0 +1,100 @@
+import { expect, test } from '@playwright/test'
+import type { Page } from '@playwright/test'
+
+async function signIn(page: Page) {
+  await page.goto('/login')
+  await page.getByLabel('Email address').fill('sam@paperdesk.test')
+  await page.getByLabel('Password').fill('password123')
+  await page.getByRole('button', { name: 'Sign in' }).click()
+  await expect(page.getByRole('heading', { name: 'Ticket board.' })).toBeVisible()
+}
+
+test('admins add available people across pages and filter members by team before pagination', async ({ page }) => {
+  await signIn(page)
+  await page.evaluate(() => {
+    const data = JSON.parse(localStorage.getItem('paperdesk_demo_data')!)
+    for (let index = 1; index <= 13; index++) {
+      data.users.push({
+        _id: `available-${index}`, name: `Available Member ${String(index).padStart(2, '0')}`, email: `available${index}@paperdesk.test`,
+        password: 'password123', role: 'employee', isActive: true, teamId: null,
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      })
+    }
+    data.users.push({ _id: 'inactive-person', name: 'Inactive Person', email: 'inactive@paperdesk.test', password: 'password123', role: 'employee', isActive: false, teamId: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() })
+    localStorage.setItem('paperdesk_demo_data', JSON.stringify(data))
+  })
+  await page.goto('/teams')
+  await page.getByRole('button', { name: 'Add members to IT', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByRole('checkbox')).toHaveCount(10)
+  await expect(dialog.getByRole('checkbox', { name: 'Select Ava Morgan' })).toHaveCount(0)
+  await expect(dialog.getByRole('checkbox', { name: 'Select Inactive Person' })).toHaveCount(0)
+  await dialog.getByRole('checkbox', { name: 'Select Available Member 01' }).check()
+  await dialog.getByRole('button', { name: 'Next' }).click()
+  await expect(dialog.getByRole('checkbox')).toHaveCount(3)
+  await dialog.getByRole('checkbox', { name: 'Select Available Member 11' }).check()
+  await dialog.getByRole('button', { name: 'Previous' }).click()
+  await expect(dialog.getByRole('checkbox', { name: 'Select Available Member 01' })).toBeChecked()
+  await expect(dialog.getByText('2 selected')).toBeVisible()
+  await page.screenshot({ path: 'artifacts/team-member-picker-desktop.png' })
+  await dialog.getByRole('button', { name: 'Add selected' }).click()
+  await expect(page.getByText('2 members added to IT.')).toBeVisible()
+  await page.reload()
+  await page.getByRole('button', { name: 'Add members to IT', exact: true }).click()
+  await expect(page.getByRole('dialog').getByRole('checkbox', { name: 'Select Available Member 01' })).toHaveCount(0)
+  await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click()
+
+  await page.getByRole('link', { name: 'Team members', exact: true }).click()
+  await page.getByLabel('Team', { exact: true }).selectOption({ label: 'IT' })
+  await expect(page.getByRole('row')).toHaveCount(5)
+  await expect(page.getByRole('row', { name: /Available Member 01/ })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Available Member 11/ })).toBeVisible()
+  await expect(page.getByRole('row', { name: /Ava Morgan/ })).toHaveCount(0)
+  await page.getByLabel('Role', { exact: true }).selectOption('employee')
+  await expect(page.getByRole('row')).toHaveCount(3)
+  await page.getByLabel('Account status', { exact: true }).selectOption('true')
+  await page.getByLabel('Team', { exact: true }).selectOption('none')
+  await expect(page.locator('.page-count')).toHaveText('1 / 2')
+  await expect(page.getByRole('row', { name: /Inactive Person/ })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Next' }).click()
+  await expect(page.locator('.page-count')).toHaveText('2 / 2')
+  await page.getByLabel('Team', { exact: true }).selectOption({ label: 'IT' })
+  await expect(page.locator('.page-count')).toHaveCount(0)
+  await expect(page.getByRole('row')).toHaveCount(3)
+  await expect(page.getByRole('row', { name: /Available Member 01/ })).toBeVisible()
+  await page.screenshot({ path: 'artifacts/members-team-filter-desktop.png', fullPage: true })
+})
+
+test('mobile member picker handles empty availability and keyboard selection', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await signIn(page)
+  await page.goto('/teams')
+  await page.getByRole('button', { name: 'Add members to IT', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByText(/No available members/)).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Add selected' })).toBeDisabled()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('button', { name: 'Add members to IT', exact: true })).toBeFocused()
+  await page.evaluate(() => {
+    const data = JSON.parse(localStorage.getItem('paperdesk_demo_data')!)
+    data.users.find((person: { _id: string }) => person._id === 'u-ava').teamId = null
+    localStorage.setItem('paperdesk_demo_data', JSON.stringify(data))
+  })
+  await page.getByRole('button', { name: 'Add members to IT', exact: true }).click()
+  const reopened = page.getByRole('dialog')
+  const checkbox = reopened.getByRole('checkbox', { name: 'Select Ava Morgan' })
+  await checkbox.focus()
+  await page.keyboard.press('Space')
+  await expect(checkbox).toBeChecked()
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
+  await page.screenshot({ path: 'artifacts/team-member-picker-mobile.png' })
+  await reopened.getByRole('button', { name: 'Add selected' }).click()
+  await expect(page.getByText('1 member added to IT.')).toBeVisible()
+  await page.goto('/users')
+  await page.getByLabel('Team', { exact: true }).selectOption({ label: 'IT' })
+  await expect(page.locator('.user-mobile-card')).toHaveCount(3)
+  await expect(page.locator('.user-mobile-card').filter({ hasText: 'Ava Morgan' })).toContainText('Team: IT')
+  await expect(page.locator('.user-mobile-card').filter({ hasText: 'Eli Brooks' })).toHaveCount(0)
+  await page.screenshot({ path: 'artifacts/members-team-filter-mobile.png', fullPage: true })
+})

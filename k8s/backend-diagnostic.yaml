@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: backend-diagnostic
+  namespace: paperdesk
+spec:
+  restartPolicy: Never
+  containers:
+    - name: backend
+      image: paperdesk-backend:pi
+      imagePullPolicy: Never
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          node dist/server.js > /tmp/backend-startup.log 2>&1
+          sleep 600
+      envFrom:
+        - secretRef:
+            name: paperdesk-backend
+      env:
+        - name: MONGODB_DB_NAME
+          value: paperdesk
+        - name: FRONTEND_ORIGIN
+          value: http://172.20.10.2:30081
+        - name: TRUST_PROXY
+          value: "0"
