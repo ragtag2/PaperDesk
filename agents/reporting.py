@@ -19,7 +19,10 @@ ANALYSES_DIRECTORY = Path(__file__).resolve().parent / "runs" / "analyses"
 def redact_secrets(data):
     """Remove configured credentials from report errors and tracing payloads."""
     if isinstance(data, str):
-        for name in ("GROQ_API_KEY", "OPENAI_API_KEY", "MONGODB_URI", "LANGFUSE_SECRET_KEY", "LANGFUSE_PUBLIC_KEY"):
+        for name in (
+            "GROQ_API_KEY", "OPENAI_API_KEY", "AGENT_MODEL_API_KEY", "MONGODB_URI",
+            "LANGFUSE_SECRET_KEY", "LANGFUSE_PUBLIC_KEY",
+        ):
             value = os.environ.get(name)
             if value:
                 data = data.replace(value, "[redacted]")

@@ -38,9 +38,16 @@ to include every active member of each selected team as a stakeholder.
 
 class IncidentCoordinator:
     def __init__(self, database: MongoDatabase, model: str | BaseChatModel, *, model_name: str | None = None,
-                 tracing: AnalysisTracing | None = None):
+                 tracing: AnalysisTracing | None = None, system_prompt: str | None = None,
+                 prompt_version: str | None = None):
+        instructions = SYSTEM_PROMPT if system_prompt is None else system_prompt
+        if not isinstance(instructions, str) or not instructions.strip():
+            raise ValueError("The system prompt must be nonempty text.")
+        if prompt_version is not None and (not isinstance(prompt_version, str) or not prompt_version.strip()):
+            raise ValueError("The prompt version must be nonempty text.")
         self.model_name = model_name or (model if isinstance(model, str) else getattr(model, "model_name", type(model).__name__))
-        self.prompt_version = sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()
+        self.prompt_hash = sha256(instructions.encode("utf-8")).hexdigest()
+        self.prompt_version = self.prompt_hash if prompt_version is None else prompt_version
         self.tracing = tracing if tracing is not None else AnalysisTracing()
         self.tools = {
             tool.name: tool for tool in create_database_tools(database)
@@ -48,7 +55,7 @@ class IncidentCoordinator:
         self.agent = create_agent(
             model=model,
             tools=list(self.tools.values()),
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=instructions,
             response_format=ToolStrategy(TeamAssessment, handle_errors=False),
         )
 

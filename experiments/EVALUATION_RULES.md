@@ -41,6 +41,16 @@ so an unexpected selection can also be assessed. The agent receives only its
 ordinary ticket/team/member tool data. The seed script excludes reference
 answers, required facts, coverage labels and evaluation notes from MongoDB.
 
+The implementation in `run.py` records this context in the Metadata of the
+dataset-linked `paperdesk-eval-case` observation and the final CoordinationResult
+in its Output. Existing judges map `evaluation_context` to the entire Metadata
+and `assistant_output` to the entire Output. Target the completed case by name
+with `evaluation_ready` equal to the string `true`, using 100% sampling. The
+reason judge also requires `reason_applicable` equal to the string `true`.
+These fields are observation metadata; evaluation rules do not retrieve CSVs or
+child-tool observations themselves. `evaluators.py` supplies deterministic scores
+through the experiment SDK on the same dataset-linked task observation.
+
 ## Deterministic evaluation
 
 Evaluate the final full-agent CoordinationResult, after stakeholder assembly,

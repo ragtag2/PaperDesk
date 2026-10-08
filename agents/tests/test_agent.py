@@ -2,6 +2,7 @@
 
 import json
 import unittest
+from hashlib import sha256
 from unittest.mock import MagicMock
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -9,7 +10,7 @@ from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
-from agents.agent import IncidentCoordinator
+from agents.agent import IncidentCoordinator, SYSTEM_PROMPT
 from agents.database import MongoDatabase
 
 
@@ -154,3 +155,25 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result.relevantTeams, [])
         self.assertEqual(result.stakeholderUserIds, [])
         self.database.get_team_members.assert_not_called()
+
+    def test_prompt_override_reaches_model_and_records_requested_version(self):
+        instructions = "Use the database tools and assess the current incident conservatively."
+        model = ScriptedChatModel(responses=scripted_responses([]))
+        coordinator = IncidentCoordinator(
+            self.database, model, system_prompt=instructions, prompt_version="experiment-system@2",
+        )
+        coordinator.analyze(TICKET_ID)
+        self.assertEqual(model.observed_messages[0][0].content, instructions)
+        self.assertEqual(coordinator.prompt_version, "experiment-system@2")
+        self.assertEqual(coordinator.prompt_hash, sha256(instructions.encode("utf-8")).hexdigest())
+
+    def test_default_prompt_and_version_remain_the_baseline(self):
+        model = ScriptedChatModel(responses=scripted_responses([]))
+        coordinator = IncidentCoordinator(self.database, model)
+        coordinator.analyze(TICKET_ID)
+        self.assertEqual(model.observed_messages[0][0].content, SYSTEM_PROMPT)
+        self.assertEqual(coordinator.prompt_version, sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest())
+
+    def test_empty_experiment_prompt_is_rejected(self):
+        with self.assertRaises(ValueError):
+            IncidentCoordinator(self.database, ScriptedChatModel(responses=[]), system_prompt="  ")

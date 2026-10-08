@@ -34,10 +34,26 @@ def create_app(coordinator: IncidentCoordinator | None = None) -> FastAPI:
         try:
             database = MongoDatabase(client[settings.mongodb_db_name])
             tracing = AnalysisTracing.from_settings(settings)
-            app.state.coordinator = IncidentCoordinator(
-                database, create_model(settings), model_name=settings.model, tracing=tracing,
+            if tracing.client is None:
+                raise RuntimeError("Configure Langfuse to load the production prompt.")
+
+            prompt = tracing.client.get_prompt(
+                "ticket-analysis-system",
+                label="production",
+                type="text",
             )
-            logger.info("Agent ready with model %s.", settings.model)
+            app.state.coordinator = IncidentCoordinator(
+                database,
+                create_model(settings),
+                model_name=settings.model,
+                tracing=tracing,
+                system_prompt=prompt.compile(),
+                prompt_version=f"ticket-analysis-system@{prompt.version}",
+            )
+            logger.info(
+                "Agent ready with model %s and prompt %s.",
+                settings.model, app.state.coordinator.prompt_version,
+            )
             yield
         finally:
             client.close()
