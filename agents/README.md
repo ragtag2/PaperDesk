@@ -99,8 +99,10 @@ agents/
   config.py        Environment settings
   model.py         Provider initialization and model request limits
   reporting.py     Per-analysis JSON reports and per-model request metrics
+  tracing.py       Optional Langfuse analysis traces and LangChain callbacks
   scripts/
     check_connections.py  Check MongoDB and Groq model availability
+    check_langfuse.py     Check the Langfuse endpoint and project API keys
     run_live.py           Start FastAPI and analyze an existing ticket over HTTP
   runs/
     *-agent-stdout.log / *-agent-stderr.log  Local service output (ignored)
@@ -176,6 +178,59 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/analyze-ticket -Conten
 ```
 
 ## Live checks
+
+### Langfuse tracing
+
+Install the updated `requirements.txt`, then configure the agent's existing
+environment file with the API key pair from your Langfuse project:
+
+```dotenv
+LANGFUSE_PUBLIC_KEY=pk-lf-your-project-key
+LANGFUSE_SECRET_KEY=sk-lf-your-project-secret
+LANGFUSE_BASE_URL=http://localhost:3001
+LANGFUSE_TRACING_ENVIRONMENT=development
+LANGFUSE_TRACING_ENABLED=true
+```
+
+This localhost address is for Python running directly on the Windows host. An
+agent running in Docker or on another machine needs a reachable Langfuse address.
+The Kubernetes agent already imports its `paperdesk-agent` Secret; add these
+settings there with the deployed endpoint and an environment such as `production`.
+Changing the local `.env` does not update that Secret. Restart the Python service
+after changing configuration or installing the tracing code.
+
+Verify the configured project without sending ticket data or making model calls:
+
+```powershell
+agents/.venv/Scripts/python.exe -m agents.scripts.check_langfuse
+```
+
+Each analysis creates one `ticket-analysis` observation with nested model calls,
+database tools, selected-team validation, and stakeholder assembly. The initial
+ticket existence check and the Python tool calls after the model are included.
+The root records the final coordination result or a redacted error and HTTP status.
+Model observations retain provider-reported usage; the existing local metrics are
+also attached to the root. Ticket text, team context, model messages, tool outputs,
+and coordination results are sent to the configured Langfuse instance. Configured
+API keys and the MongoDB connection string are redacted from tracing payloads and
+errors.
+
+Filter by `ticketId`, `analysisId`, `model`, or `promptVersion`. Each analysis has
+a fresh trace ID; the ticket ID also groups repeated analyses into one Langfuse
+session. `promptVersion` is the SHA-256 hash of the system prompt stored in code.
+Automatic JSON reports include `promptVersion`, `langfuseTraceId`, and
+`langfuseTraceUrl`; the link can be null when the project is unreachable at startup.
+Trace-link lookup runs once at startup rather than during model requests.
+
+Tracing is disabled when either key is absent or `LANGFUSE_TRACING_ENABLED=false`.
+Trace setup/export failures do not replace valid coordination or its application
+errors. Local reports remain available independently. The service exports traces
+in the background and flushes at graceful shutdown. Force-stopping a process can
+lose pending spans, including when the temporary `run_live` runner terminates its
+subprocess; use a running service to inspect ongoing analyses. Traces may take a
+few seconds to appear while Langfuse processes them.
+
+### MongoDB and model checks
 
 Check MongoDB access and whether Groq lists the selected model for your key:
 

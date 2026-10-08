@@ -13,6 +13,7 @@ from .config import Settings
 from .database import MongoDatabase, TicketNotFoundError, create_mongo_client
 from .model import create_model
 from .schemas import AnalyzeTicketRequest, CoordinationResult, ErrorResponse
+from .tracing import AnalysisTracing
 
 
 logger = logging.getLogger(__name__)
@@ -29,13 +30,19 @@ def create_app(coordinator: IncidentCoordinator | None = None) -> FastAPI:
         settings = Settings.from_env()
         logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
         client = create_mongo_client(settings)
+        tracing = None
         try:
             database = MongoDatabase(client[settings.mongodb_db_name])
-            app.state.coordinator = IncidentCoordinator(database, create_model(settings), model_name=settings.model)
+            tracing = AnalysisTracing.from_settings(settings)
+            app.state.coordinator = IncidentCoordinator(
+                database, create_model(settings), model_name=settings.model, tracing=tracing,
+            )
             logger.info("Agent ready with model %s.", settings.model)
             yield
         finally:
             client.close()
+            if tracing is not None:
+                tracing.shutdown()
 
     app = FastAPI(title="Paperdesk incident coordination agent", lifespan=lifespan)
 

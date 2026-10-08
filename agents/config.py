@@ -3,7 +3,7 @@
 import os
 from ipaddress import ip_address
 from math import isfinite
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -17,6 +17,11 @@ class Settings:
     mongodb_dns_servers: tuple[str, ...] = ()
     model_timeout_seconds: float = 20
     model_max_tokens: int = 2048
+    langfuse_public_key: str = field(default="", repr=False)
+    langfuse_secret_key: str = field(default="", repr=False)
+    langfuse_base_url: str = "https://cloud.langfuse.com"
+    langfuse_tracing_enabled: bool = True
+    langfuse_environment: str = "development"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -51,4 +56,9 @@ class Settings:
             mongodb_dns_servers=dns_servers,
             model_timeout_seconds=timeout,
             model_max_tokens=max_tokens,
+            langfuse_public_key=os.environ.get("LANGFUSE_PUBLIC_KEY", "").strip(),
+            langfuse_secret_key=os.environ.get("LANGFUSE_SECRET_KEY", "").strip(),
+            langfuse_base_url=os.environ.get("LANGFUSE_BASE_URL", "https://cloud.langfuse.com").strip().rstrip("/"),
+            langfuse_tracing_enabled=os.environ.get("LANGFUSE_TRACING_ENABLED", "true").strip().lower() == "true",
+            langfuse_environment=os.environ.get("LANGFUSE_TRACING_ENVIRONMENT", "development").strip(),
         )

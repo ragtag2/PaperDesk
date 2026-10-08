@@ -51,11 +51,14 @@ class ApiTests(unittest.TestCase):
                 "MONGODB_DB_NAME": "paperdesk",
                 "AGENT_MODEL": "openai:test-model",
                 "OPENAI_API_KEY": "test-placeholder",
+                "LANGFUSE_TRACING_ENABLED": "false",
             },
-        ), patch("agents.main.create_mongo_client") as mongo_client:
+        ), patch("agents.main.create_mongo_client") as mongo_client, \
+                patch("agents.main.AnalysisTracing.from_settings") as tracing:
             with TestClient(create_app()) as client:
                 self.assertEqual(client.get("/docs").status_code, 200)
             mongo_client.return_value.close.assert_called_once()
+            tracing.return_value.shutdown.assert_called_once()
 
     def test_invalid_input_uses_contract_error_format(self):
         for body in [{"ticketId": "invalid"}, {"ticketId": TICKET_ID, "teams": []}]:
