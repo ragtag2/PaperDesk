@@ -1,0 +1,5 @@
+-r ../agents/requirements.txt
+bcrypt>=4,<6
+pymongo>=4.10,<5
+dnspython>=2.6,<3
+python-dotenv>=1.0,<2

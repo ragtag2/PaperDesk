@@ -99,8 +99,10 @@ agents/
   config.py        Environment settings
   model.py         Provider initialization and model request limits
   reporting.py     Per-analysis JSON reports and per-model request metrics
+  tracing.py       Optional Langfuse analysis traces and LangChain callbacks
   scripts/
     check_connections.py  Check MongoDB and Groq model availability
+    check_langfuse.py     Check the Langfuse endpoint and project API keys
     run_live.py           Start FastAPI and analyze an existing ticket over HTTP
   runs/
     *-agent-stdout.log / *-agent-stderr.log  Local service output (ignored)
@@ -119,19 +121,35 @@ agents/.venv/Scripts/python.exe -m pip install -r agents/requirements.txt
 If `agents/.env` does not exist yet, copy `agents/.env.example` into it. Keep
 existing credentials when updating a configured environment.
 
-Set the same MongoDB connection and database name as Express, and configure Groq:
+Set the same MongoDB connection and database name as Express. To use the Lightning
+model configured in `../light.py`, set:
 
 ```dotenv
-AGENT_MODEL=groq:qwen/qwen3.8-27b
-GROQ_API_KEY=your-groq-api-key
+AGENT_MODEL=openai:lightning-ai/deepseek-v4.1-flash
+AGENT_MODEL_BASE_URL=https://lightning.ai/api/v1/
+AGENT_MODEL_API_KEY=your-lightning-api-key
 AGENT_MODEL_TIMEOUT_SECONDS=20
 AGENT_MODEL_MAX_TOKENS=2048
 ```
 
-The included `langchain-groq` adapter initializes `ChatGroq`. The display name
-`groq:Qwen/Qwen3.8-27B` is also accepted and normalized to Groq's lowercase API ID.
-Qwen reasoning is disabled for this concise coordination workflow. Each model
-call has a configured timeout and output limit, with automatic provider retries
+The `openai:` prefix selects the included `langchain-openai` adapter; requests use
+the model ID `lightning-ai/deepseek-v4.1-flash` at the explicit Lightning endpoint
+through Chat Completions (`use_responses_api=False`). Keep the credential in
+`agents/.env`. Both the HTTP service and the experiment runner use these settings;
+an already running service reads changes when restarted. The agent does not read
+credentials from the Langfuse judge connection.
+
+For this model at the Lightning endpoint, a small adapter maps the agent's forced
+`any`/`required` tool selection to `auto`, which DeepSeek supports in thinking
+mode. The same tools and structured-result validation remain active. The adapter
+also preserves the provider's `reasoning_content` field across non-streaming
+tool exchanges. Other configured providers keep their usual tool bindings.
+
+Groq remains supported: clear `AGENT_MODEL_BASE_URL` and `AGENT_MODEL_API_KEY`, set
+`AGENT_MODEL=groq:qwen/qwen3.8-27b` and supply `GROQ_API_KEY`. Its display name
+`groq:Qwen/Qwen3.8-27B` is also accepted and normalized to Groq's lowercase API ID;
+Qwen reasoning is disabled for that model. Each model call has a configured
+timeout and output limit, with automatic provider retries
 disabled; the existing graph recursion limit is 20. A per-call timeout is not a
 deadline for the whole analysis. Express retains its 60-second HTTP timeout.
 
@@ -154,8 +172,8 @@ HTTP status, the complete result (including team reasons), and consistency
 checks. Metrics include model call counts, requested tools, actual database tool
 calls, input/output/cached input tokens, and each model request's timing/status.
 Failed requests retain the usage recorded before failure and a redacted error;
-missing tickets produce reports with HTTP 404 without invoking Groq. The checks
-confirm structural consistency, not the semantic quality of the team selection.
+missing tickets produce reports with HTTP 404 without invoking the model. The
+checks confirm structural consistency, not the semantic quality of team selection.
 Interrupted processes can leave a report marked `running`.
 
 Report writes are best effort: a filesystem error is logged without discarding
@@ -177,14 +195,96 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/analyze-ticket -Conten
 
 ## Live checks
 
-Check MongoDB access and whether Groq lists the selected model for your key:
+### Production prompt at service startup
+
+The normal HTTP service fetches the Langfuse **text** prompt
+`ticket-analysis-system` with the `production` label once during startup. It
+passes the compiled text and resolved version (for example
+`ticket-analysis-system@3`) to the existing coordinator. Model settings, database
+tools, stakeholder assembly and the HTTP result schema continue to come from
+the application code and environment. Langfuse prompt Config is not read.
+
+Assign `production` to the approved version in the Langfuse project used by the
+service, then restart it. Label changes are not fetched during ticket requests.
+The ready log, local analysis reports and Langfuse metadata record the actual
+version loaded. Rolling back follows the same process: move `production` to an
+earlier approved version and restart.
+
+Service startup now requires `LANGFUSE_TRACING_ENABLED=true`, both Langfuse project
+keys, and a reachable endpoint serving that prompt. Disabled or missing tracing
+configuration and a failed prompt fetch stop startup. Database and tracing
+clients are closed on both normal shutdown and startup failure. Direct
+coordinator calls still support their existing built-in instructions and optional
+overrides; experiments continue to select pinned numeric versions independently.
+
+The deployment uses the `paperdesk-agent` Kubernetes Secret. Its explicit
+MongoDB settings come from `k8s/agent.yaml` and the backend Secret. See
+`../k8s/README.md` for updating the agent environment and deploying the current
+feature branch through the existing main-branch workflow.
+
+### Langfuse tracing
+
+Install the updated `requirements.txt`, then configure the agent's existing
+environment file with the API key pair from your Langfuse project:
+
+```dotenv
+LANGFUSE_PUBLIC_KEY=pk-lf-your-project-key
+LANGFUSE_SECRET_KEY=sk-lf-your-project-secret
+LANGFUSE_BASE_URL=http://localhost:3001
+LANGFUSE_TRACING_ENVIRONMENT=development
+LANGFUSE_TRACING_ENABLED=true
+```
+
+This localhost address is for Python running directly on the Windows host. An
+agent running in Docker or on another machine needs a reachable Langfuse address.
+The Kubernetes agent already imports its `paperdesk-agent` Secret; add these
+settings there with the deployed endpoint and an environment such as `production`.
+Changing the local `.env` does not update that Secret. Restart the Python service
+after changing configuration or installing the tracing code.
+
+Verify the configured project without sending ticket data or making model calls:
+
+```powershell
+agents/.venv/Scripts/python.exe -m agents.scripts.check_langfuse
+```
+
+Each analysis creates one `ticket-analysis` observation with nested model calls,
+database tools, selected-team validation, and stakeholder assembly. The initial
+ticket existence check and the Python tool calls after the model are included.
+The root records the final coordination result or a redacted error and HTTP status.
+Model observations retain provider-reported usage; the existing local metrics are
+also attached to the root. Ticket text, team context, model messages, tool outputs,
+and coordination results are sent to the configured Langfuse instance. Configured
+API keys and the MongoDB connection string are redacted from tracing payloads and
+errors.
+
+Filter by `ticketId`, `analysisId`, `model`, or `promptVersion`. Each analysis has
+a fresh trace ID; the ticket ID also groups repeated analyses into one Langfuse
+session. `promptVersion` is the SHA-256 hash of the system prompt stored in code.
+Automatic JSON reports include `promptVersion`, `langfuseTraceId`, and
+`langfuseTraceUrl`; the link can be null when the project is unreachable at startup.
+Trace-link lookup runs once at startup rather than during model requests.
+
+Tracing is disabled when either key is absent or `LANGFUSE_TRACING_ENABLED=false`.
+Trace setup/export failures do not replace valid coordination or its application
+errors. Local reports remain available independently. The service exports traces
+in the background and flushes at graceful shutdown. Force-stopping a process can
+lose pending spans, including when the temporary `run_live` runner terminates its
+subprocess; use a running service to inspect ongoing analyses. Traces may take a
+few seconds to appear while Langfuse processes them.
+
+### MongoDB and model checks
+
+Check MongoDB access. For a Groq configuration, this also checks whether Groq lists
+the selected model for your key:
 
 ```powershell
 agents/.venv/Scripts/python.exe -m agents.scripts.check_connections
 ```
 
 This prints only connection status and record counts, and sends no database
-records to Groq.
+records to the model. It does not test Lightning model availability; an actual
+analysis or experiment run verifies model requests and tool use.
 
 Run an actual analysis through HTTP using the latest existing MongoDB ticket:
 
@@ -201,8 +301,8 @@ agents/.venv/Scripts/python.exe -m agents.scripts.run_live --ticket-id 507f1f77b
 The runner starts a local FastAPI subprocess, waits for its API to become ready,
 sends only `{ ticketId }` to `/analyze-ticket`, and prints the real response. The
 agent reads the ticket and team context from MongoDB and sends tool results to
-Groq. It validates the response schema, ticket identity, known/unique teams, and
-the exact union of active team members. It saves a timestamped `*-live.json`
+the configured model. It validates the response schema, ticket identity,
+known/unique teams, and the exact union of active team members. It saves a timestamped `*-live.json`
 report and service log in `agents/runs/analyses/<ticketId>/`, then stops only the
 service it started. Neither the runner nor the agent writes MongoDB records.
 Model call counts, tool names,

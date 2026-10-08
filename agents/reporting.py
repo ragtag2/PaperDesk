@@ -16,13 +16,25 @@ logger = logging.getLogger(__name__)
 ANALYSES_DIRECTORY = Path(__file__).resolve().parent / "runs" / "analyses"
 
 
+def redact_secrets(data):
+    """Remove configured credentials from report errors and tracing payloads."""
+    if isinstance(data, str):
+        for name in (
+            "GROQ_API_KEY", "OPENAI_API_KEY", "AGENT_MODEL_API_KEY", "MONGODB_URI",
+            "LANGFUSE_SECRET_KEY", "LANGFUSE_PUBLIC_KEY",
+        ):
+            value = os.environ.get(name)
+            if value:
+                data = data.replace(value, "[redacted]")
+    elif isinstance(data, dict):
+        return {key: redact_secrets(value) for key, value in data.items()}
+    elif isinstance(data, (list, tuple)):
+        return type(data)(redact_secrets(value) for value in data)
+    return data
+
+
 def safe_error(error: BaseException) -> str:
-    message = str(error)
-    for name in ("GROQ_API_KEY", "OPENAI_API_KEY", "MONGODB_URI"):
-        value = os.environ.get(name)
-        if value:
-            message = message.replace(value, "[redacted]")
-    return f"{type(error).__name__}: {message}"
+    return f"{type(error).__name__}: {redact_secrets(str(error))}"
 
 
 class AnalysisMetrics(BaseCallbackHandler):

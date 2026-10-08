@@ -3,7 +3,7 @@
 import os
 from ipaddress import ip_address
 from math import isfinite
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -17,6 +17,13 @@ class Settings:
     mongodb_dns_servers: tuple[str, ...] = ()
     model_timeout_seconds: float = 20
     model_max_tokens: int = 2048
+    langfuse_public_key: str = field(default="", repr=False)
+    langfuse_secret_key: str = field(default="", repr=False)
+    langfuse_base_url: str = "https://cloud.langfuse.com"
+    langfuse_tracing_enabled: bool = True
+    langfuse_environment: str = "development"
+    model_base_url: str = ""
+    model_api_key: str = field(default="", repr=False)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -30,6 +37,13 @@ class Settings:
             model = "groq:qwen/qwen3.8-27b"
         if model.startswith("groq:") and not os.environ.get("GROQ_API_KEY", "").strip():
             raise ValueError("Set GROQ_API_KEY in agents/.env to use Groq.")
+        model_base_url = os.environ.get("AGENT_MODEL_BASE_URL", "").strip()
+        model_api_key = os.environ.get("AGENT_MODEL_API_KEY", "").strip()
+        if model_base_url or model_api_key:
+            if not model.startswith("openai:"):
+                raise ValueError("Use an openai: model ID for the custom OpenAI-compatible endpoint.")
+            if not model_base_url or not model_api_key:
+                raise ValueError("Set both AGENT_MODEL_BASE_URL and AGENT_MODEL_API_KEY in agents/.env.")
         database_name = os.environ.get("MONGODB_DB_NAME", "paperdesk").strip()
         if not database_name:
             raise ValueError("MONGODB_DB_NAME must not be empty.")
@@ -51,4 +65,11 @@ class Settings:
             mongodb_dns_servers=dns_servers,
             model_timeout_seconds=timeout,
             model_max_tokens=max_tokens,
+            model_base_url=model_base_url,
+            model_api_key=model_api_key,
+            langfuse_public_key=os.environ.get("LANGFUSE_PUBLIC_KEY", "").strip(),
+            langfuse_secret_key=os.environ.get("LANGFUSE_SECRET_KEY", "").strip(),
+            langfuse_base_url=os.environ.get("LANGFUSE_BASE_URL", "https://cloud.langfuse.com").strip().rstrip("/"),
+            langfuse_tracing_enabled=os.environ.get("LANGFUSE_TRACING_ENABLED", "true").strip().lower() == "true",
+            langfuse_environment=os.environ.get("LANGFUSE_TRACING_ENVIRONMENT", "development").strip(),
         )

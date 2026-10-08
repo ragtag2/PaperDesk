@@ -1,2 +1,3 @@
 -r requirements.txt
+bcrypt>=4,<6
 httpx>=0.27,<1
