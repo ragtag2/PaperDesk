@@ -1,0 +1,28 @@
+# Render this template using the README command before passing it to OpenShell.
+# Lightning's network rule is supplied by lightning-profile.yaml's provider.
+version: 1
+filesystem_policy:
+  include_workdir: false
+  read_only:
+    - /app
+    - /usr
+    - /lib
+    - /lib64
+    - /etc
+    - /proc
+    - /dev/urandom
+    - /dev/random
+  read_write:
+    - /app/agents/runs
+    - /tmp
+    - /dev/null
+landlock:
+  compatibility: hard_requirement
+process:
+  run_as_user: "10001"
+  run_as_group: "10001"
+network_policies:
+  mongodb_atlas:
+    endpoints: [] # REPLACED_FROM_MONGODB_URI
+    binaries:
+      - path: /usr/local/bin/python3.12
