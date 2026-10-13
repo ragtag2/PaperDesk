@@ -26,6 +26,9 @@ from pymongo.errors import PyMongoError
 
 FIXTURE_DIR = Path(__file__).resolve().parent
 DATABASE_NAME = "paperdesk_eval"
+TEAM_COUNT = 12
+USER_COUNT = 32
+CASE_COUNT = 30
 CREATED_AT = datetime(2026, 10, 1, 9, tzinfo=timezone.utc)
 UPDATED_AT = datetime(2026, 10, 8, 9, tzinfo=timezone.utc)
 TEAM_COLUMNS = ("_id", "name", "responsibilities")
@@ -72,6 +75,12 @@ def read_rows(filename: str, columns: tuple[str, ...], count: int) -> list[dict[
 def string_list(value: Any, label: str) -> list[str]:
     require(isinstance(value, list), f"{label}: an array is required.")
     return [text_value(item, label) for item in value]
+
+
+def case_group(case_id: str) -> str:
+    require(case_id in {f"E{number:02d}" for number in range(1, CASE_COUNT + 1)},
+            f"Unknown evaluation case: {case_id}.")
+    return "regression" if int(case_id[1:]) <= 10 else "held_out"
 
 
 def validate_reference(row: dict[str, str], team_ids: set[str], users: list[dict[str, Any]]) -> None:
@@ -135,9 +144,9 @@ def coordination_document(value: Any, team_ids: set[str], user_ids: set[str]) ->
 
 
 def load_fixture() -> dict[str, list[dict[str, Any]]]:
-    team_rows = read_rows("teams.csv", TEAM_COLUMNS, 6)
-    user_rows = read_rows("users.csv", USER_COLUMNS, 15)
-    ticket_rows = read_rows("tickets.csv", TICKET_COLUMNS, 10)
+    team_rows = read_rows("teams.csv", TEAM_COLUMNS, TEAM_COUNT)
+    user_rows = read_rows("users.csv", USER_COLUMNS, USER_COUNT)
+    ticket_rows = read_rows("tickets.csv", TICKET_COLUMNS, CASE_COUNT)
     team_ids = {row["_id"] for row in team_rows}
     user_ids = {row["_id"] for row in user_rows}
     teams = [{"_id": object_id(row["_id"]), "name": text_value(row["name"], "Team name", 120),
@@ -156,19 +165,22 @@ def load_fixture() -> dict[str, list[dict[str, Any]]]:
                       "teamId": object_id(row["teamId"]) if row["teamId"] else None,
                       "sessionVersion": 0, "createdAt": CREATED_AT, "updatedAt": UPDATED_AT})
     require(len({user["email"] for user in users}) == len(users), "Duplicate fixture emails.")
-    require(Counter(str(user["teamId"]) for user in users if user["isActive"] and user["teamId"])
-            == Counter({team_id: 2 for team_id in team_ids}), "Each team needs two active members.")
-    require(sum(not user["isActive"] for user in users) == 2
-            and len({user["teamId"] for user in users if not user["isActive"]}) == 2
-            and all(user["teamId"] is not None for user in users if not user["isActive"])
-            and sum(user["isActive"] and user["teamId"] is None for user in users) == 1,
-            "Expected two inactive members in different teams and one active unassigned user.")
+    active_counts = Counter({team_id: 0 for team_id in team_ids})
+    active_counts.update(str(user["teamId"]) for user in users if user["isActive"] and user["teamId"])
+    require(0 in active_counts.values() and len(set(active_counts.values())) >= 3,
+            "Expected varied active memberships and a team with no active members.")
+    require(any(not user["isActive"] and user["teamId"] is not None for user in users)
+            and any(user["isActive"] and user["teamId"] is None for user in users),
+            "Expected inactive team members and an active unassigned user.")
 
-    require(len({row["case_id"] for row in ticket_rows}) == 10, "Duplicate case identifiers.")
+    require({row["case_id"] for row in ticket_rows}
+            == {f"E{number:02d}" for number in range(1, CASE_COUNT + 1)},
+            "Expected unique case identifiers E01-E30.")
     require(Counter(row["coverage"] for row in ticket_rows) == Counter({
-        "straightforward": 3, "cross_team": 3, "incomplete_information": 2,
-        "no_relevant_team": 1, "outdated_coordination": 1,
-    }), "Ticket coverage differs from the agreed ten-case mix.")
+        "straightforward": 9, "cross_team": 9, "incomplete_information": 3,
+        "responsibility_boundary": 3, "no_relevant_team": 2,
+        "outdated_coordination": 3, "long_noisy": 1,
+    }), "Ticket coverage differs from the thirty-case design.")
     users_by_id = {str(user["_id"]): user for user in users}
     tickets = []
     for row in ticket_rows:
@@ -194,18 +206,42 @@ def load_fixture() -> dict[str, list[dict[str, Any]]]:
             "assigneeId": object_id(row["assigneeId"]) if row["assigneeId"] else None,
             "coordination": previous, "createdAt": CREATED_AT, "updatedAt": UPDATED_AT,
         })
+    selected_ids = {team["teamId"] for row in ticket_rows
+                    for team in json.loads(row["expected_answer_json"])["relevantTeams"]}
+    require(any(active_counts[team_id] == 0 for team_id in selected_ids),
+            "At least one case must select a team with no active members.")
     return {"teams": teams, "users": users, "tickets": tickets}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Load the evaluation CSVs into the fixed paperdesk_eval database.")
+    parser.add_argument("--validate-only", action="store_true",
+                        help="Validate local fixtures without credentials or a database connection.")
+    parser.add_argument("--export-new-cases", type=Path,
+                        help="With --validate-only, write E11-E30 in the existing ticket CSV format to a new file.")
     parser.add_argument("--env-file", type=Path, default=FIXTURE_DIR.parent / "agents" / ".env",
                         help="Read MONGODB_URI and optional MONGODB_DNS_SERVERS here; process environment takes precedence.")
     args = parser.parse_args()
+    if args.export_new_cases is not None and not args.validate_only:
+        parser.error("--export-new-cases requires --validate-only.")
+    fixture = load_fixture()
+    if args.validate_only:
+        rows = read_rows("tickets.csv", TICKET_COLUMNS, CASE_COUNT)
+        summary = {"database": DATABASE_NAME, "teams": len(fixture["teams"]),
+                   "users": len(fixture["users"]), "cases": len(fixture["tickets"]),
+                   "groups": dict(Counter(case_group(row["case_id"]) for row in rows))}
+        if args.export_new_cases is not None:
+            # Exclusive creation prevents accidentally overwriting an original fixture.
+            with args.export_new_cases.open("x", encoding="utf-8", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=TICKET_COLUMNS)
+                writer.writeheader()
+                writer.writerows(row for row in rows if case_group(row["case_id"]) == "held_out")
+            summary["export_file"] = str(args.export_new_cases)
+        print(json.dumps(summary))
+        return
     load_dotenv(args.env_file, override=False)
     uri = os.environ.get("MONGODB_URI", "").strip()
     require(uri.startswith(("mongodb://", "mongodb+srv://")), "Set MONGODB_URI in the environment or env file.")
-    fixture = load_fixture()
     dns_servers = [server.strip() for server in os.environ.get("MONGODB_DNS_SERVERS", "").split(",") if server.strip()]
     for server in dns_servers:
         ip_address(server)
@@ -219,15 +255,21 @@ def main() -> None:
         for name, documents in fixture.items():
             unexpected = database[name].find_one({"_id": {"$nin": [doc["_id"] for doc in documents]}}, {"_id": 1})
             require(unexpected is None, f"{DATABASE_NAME}.{name} has records outside this fixture; use a dedicated fixture database.")
-        # Satisfy the shared user schema without retaining login passwords in the fixture.
+        # Keep existing login state; new fixture users receive discarded random passwords.
         for user in fixture["users"]:
-            user["passwordHash"] = bcrypt.hashpw(secrets.token_urlsafe(32).encode("utf-8"),
-                                                  bcrypt.gensalt(rounds=12)).decode("ascii")
+            current = database.users.find_one({"_id": user["_id"]}, {"passwordHash": 1, "sessionVersion": 1})
+            if current is not None and current.get("passwordHash"):
+                user["passwordHash"] = current["passwordHash"]
+                user["sessionVersion"] = current.get("sessionVersion", user["sessionVersion"])
+            else:
+                user["passwordHash"] = bcrypt.hashpw(secrets.token_urlsafe(32).encode("utf-8"),
+                                                      bcrypt.gensalt(rounds=12)).decode("ascii")
         database.users.create_index("email", unique=True)
         database.users.create_index("teamId")
         for name, documents in fixture.items():
             database[name].bulk_write([ReplaceOne({"_id": doc["_id"]}, doc, upsert=True) for doc in documents], ordered=True)
-    print(f"Seeded 6 teams, 15 users and 10 tickets in {DATABASE_NAME}.")
+    print(f"Seeded {len(fixture['teams'])} teams, {len(fixture['users'])} users "
+          f"and {len(fixture['tickets'])} tickets in {DATABASE_NAME}.")
 
 
 if __name__ == "__main__":

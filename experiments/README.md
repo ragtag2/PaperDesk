@@ -1,11 +1,20 @@
 # Agent evaluation fixtures
 
-Prepared: 2026-10-08.
+Updated: 2026-10-13.
 
-This folder contains the frozen experiment data, seed script, full-agent runner,
-deterministic evaluators and evaluation rules. The runner was prepared without
-executing Python, tests, dependency installation, agent analyses or Langfuse
-operations. The user has already successfully seeded `paperdesk_eval`.
+This folder contains the evaluation data, seed script, full-agent runner,
+deterministic evaluators and evaluation rules. Ticket 01 adds twenty cases,
+six teams and seventeen users to the original fixture. Every original case,
+reference, team and user record remains unchanged, including memberships.
+The expanded local fixture has been checked offline; no expanded seed,
+Langfuse import, evaluator reconfiguration or measured analysis was performed.
+
+The existing runner can load the expanded fixture. Explicit A-E variants and
+separate study provenance belong to ticket 02 and are not implemented yet.
+The V1/V2/V3 commands below document the historical pilot, not instructions to
+start the new study. Keep the new twenty cases out of prompt tuning and preserve
+the existing pilot reports/baseline. The user imports new Langfuse items and runs
+the eventual experiment commands. Existing evaluators and their setup stay unchanged.
 
 The agent is configured in `agents/.env` to use
 `openai:lightning-ai/deepseek-v4.1-flash` at `https://lightning.ai/api/v1/`, matching
@@ -17,10 +26,10 @@ credential stays in the local environment; it is not experiment metadata.
 
 | File | Contents |
 | --- | --- |
-| `teams.csv` | Six teams with explicit responsibility boundaries. |
-| `users.csv` | Fifteen synthetic users: twelve active team members, two inactive members in different teams, and one active unassigned user. |
-| `tickets.csv` | Ten tickets with reference answers, required facts and evaluation notes. |
-| `seed.py` | Manually invoked loader for the fixed `paperdesk_eval` database. |
+| `teams.csv` | Twelve teams: the original six plus HR, Procurement, Facilities, Legal & Compliance, Customer Support, and Data & Analytics. |
+| `users.csv` | Thirty-two synthetic users: the original fifteen plus seventeen additions, with varied memberships and a zero-active-member team. |
+| `tickets.csv` | Thirty tickets with reference answers, required facts and evaluation notes; the original ten rows are unchanged. |
+| `seed.py` | Shared validation, local-only validation/export, and explicit seeding of the fixed `paperdesk_eval` database. |
 | `import_directory.py` | Import only fixture teams/users into `paperdesk`, preserving Akrem/Rayen and existing tickets. |
 | `run.py` | Manually run one full-agent V1, V2 or V3 round linked to a Langfuse dataset. |
 | `check_model.py` | Manually isolate model endpoint, token-parameter and initial tool-call failures without database or experiment calls. |
@@ -42,6 +51,35 @@ credential stays in the local environment; it is not experiment metadata.
 | E08 | Authentication symptom with unknown cause/impact | Security & Access |
 | E09 | Personal question without workplace involvement | None |
 | E10 | Updated issue with obsolete coordination | Finance |
+| E11 | Leave balance correction | HR |
+| E12 | Purchase approval and quote review | Procurement |
+| E13 | Office HVAC failure | Facilities |
+| E14 | Contract clause review; zero active members | Legal & Compliance |
+| E15 | External customer service-policy inquiry | Customer Support |
+| E16 | Analytical join duplicates rows | Data & Analytics |
+| E17 | Leave correction with explicit payroll effect | HR; Finance |
+| E18 | Printer fault and replacement purchasing | IT Support; Procurement |
+| E19 | Confirmed building circuit fault blocks dispatch connectivity | Facilities; Infrastructure; Operations |
+| E20 | Suspicious sign-ins and explicit contract assessment | Security & Access; Legal & Compliance |
+| E21 | Application defect blocks customer-case updates | Business Applications; Customer Support |
+| E22 | Analytical join blocks financial review | Data & Analytics; Finance |
+| E23 | New hire's MFA fault; HR records correct | Security & Access |
+| E24 | Unknown portal save error blocks leave processing | Business Applications; HR |
+| E25 | Duplicate invoice; purchasing correct | Finance |
+| E26 | Shared Wi-Fi fault in HR office; no HR workflow impact | Infrastructure |
+| E27 | Current analytical fault supersedes HR/payroll coordination | Data & Analytics |
+| E28 | Current invoice correction supersedes device/purchasing coordination | Finance |
+| E29 | Personal book recommendation | None |
+| E30 | Long HVAC report with unrelated notes and instruction-like text | Facilities |
+
+E01-E10 form the regression group; E11-E30 form the held-out group. Group is
+derived from the stable case ID, so no column or field was added to original rows.
+The primary comparison uses all thirty cases, with both groups reported separately.
+
+The added memberships use the design proposal: HR has three active and one
+inactive member; Procurement one active; Facilities four active; Legal & Compliance
+one inactive and no active members; Customer Support five active; Data & Analytics
+two active. No added user changes an original team's active-member set.
 
 ## CSV format and reference data
 
@@ -59,15 +97,40 @@ The required-fact columns and evaluation notes define that meaning.
 
 Evaluation-only columns are kept in this folder. The ticket documents inserted
 into MongoDB contain only ordinary application fields plus the intended previous
-coordination. Nine previous-coordination values are null; E10 includes Security
-& Access and Finance from an earlier MFA incident, while its current reference
-selects Finance alone.
+coordination. E10 retains its original earlier MFA incident and Finance-only
+current reference. E27 and E28 add earlier, resolved coordination; all other
+previous-coordination values are null.
+
+## Validate and export additions locally
+
+These commands require no MongoDB, model or Langfuse credentials and do not read
+the env file or connect to a database:
+
+```powershell
+.\agents\.venv\Scripts\python.exe -B -m experiments.seed --validate-only
+.\agents\.venv\Scripts\python.exe -B -m experiments.seed --validate-only --export-new-cases .\new-cases.csv
+```
+
+Validation prints counts for twelve teams, thirty-two users and thirty cases,
+including the ten/twenty groups. The export contains only E11-E30 in the same
+ticket CSV format as the original data; parse CSV before parsing its JSON cells.
+The destination must be a new file so an existing fixture/export cannot be
+overwritten accidentally. Exporting requires `--validate-only` and never seeds.
+
+Import the twenty additions into the existing Langfuse dataset yourself, keeping
+its original ten items, item IDs, inputs, expected outputs and metadata intact.
+Use each new row's `_id` as Input `{ "ticketId": "<quoted ID>" }` and its parsed
+`expected_answer_json` as Expected Output, following the same workflow used for
+the original rows. The local runner supplies the full evaluation context through
+the existing mapping; no evaluator setup change is needed. Neither validation
+nor export creates or edits hosted items.
 
 ## Manual seed instructions
 
-The existing experiment database is already seeded. These commands are retained
-as setup/restoration instructions; running the experiment does not require
-seeding it again. The assistant has not executed them.
+The existing experiment database was seeded with the original fixture. Preparing
+the expanded database is a separate explicit action; local CSV changes do not
+update it. Validate first, then seed only when ready to restore the evaluation
+records. The assistant has not executed the seed command for this expansion.
 Use Python 3.11 or newer. From the project root, using the existing agent virtual
 environment in PowerShell:
 
@@ -95,12 +158,13 @@ Seeding upserts teams, users and tickets by their fixed IDs. Re-running restores
 their fields and the intended previous coordination. It creates the user email
 uniqueness and membership indexes. Dates are fixed: created at
 2026-10-01T09:00:00Z and updated at 2026-10-08T09:00:00Z. E10's previous analysis
-is dated 2026-10-07T09:00:00Z.
+is dated 2026-10-07T09:00:00Z, as are the added E27/E28 previous analyses.
 
 The shared user schema requires password hashes. Seeding generates valid bcrypt
 hashes from random passwords that are not retained, so these users serve as
-membership fixtures rather than accounts with known login credentials. Hashes
-are regenerated on each seed; the agent does not read them.
+membership fixtures rather than accounts with known login credentials. Existing
+hashes and session versions are preserved on repeat seeds; only new users need
+generated hashes. The agent does not read these login fields.
 
 Writes span three collections and are not a transaction. If seeding is
 interrupted, rerun it to finish restoring the fixture.
@@ -129,7 +193,7 @@ preserving existing password hashes, session versions and creation timestamps.
 
 New fixture users keep the CSV roles, memberships and active/inactive flags.
 The required `passwordHash` is generated from a discarded random value; there
-are no provided or retained login passwords. The transaction verifies all 21
+are no provided or retained login passwords. The transaction verifies all 44
 fixture records, protected accounts and a fingerprint of existing tickets before
 committing. It requires a replica set or sharded cluster, including MongoDB Atlas.
 No evaluation tickets, expected answers or judge context are imported into
@@ -147,11 +211,12 @@ Use its read-only analysis path so outputs do not overwrite seeded coordination.
 Judge input must contain the frozen ticket/team evidence as well as the actual
 output; the ticket ID alone does not provide enough judging context.
 
-Follow `EVALUATION_RULES.md` for scoring. Run V1, review its failures, develop V2,
-run it, then develop and run V3. Langfuse configuration and execution remain
-user-managed; prompt revisions are made only after reviewing the prior round.
+Follow the existing `EVALUATION_RULES.md` for scoring semantics. The pilot's
+V1/V2/V3 tuning sequence is historical. The expanded study fixes V3 and compares
+A-E once each; its variant commands will be delivered in ticket 02. Langfuse
+dataset import and measured execution remain user-managed.
 
-## Run one round manually
+## Historical prompt-round runner (reference only)
 
 Use the existing agent virtual environment. `requirements.txt` includes the
 agent dependencies; install it only if that environment is missing dependencies.
@@ -160,7 +225,7 @@ MongoDB, the configured agent-model credentials, and both Langfuse keys, with
 `LANGFUSE_TRACING_ENABLED=true`. It forces its own database destination to
 `paperdesk_eval` without editing `.env` or changing the normal service database.
 
-Create the dataset yourself in Langfuse. It must contain exactly ten active
+After user-managed addition of E11-E30, the local fixture requires exactly thirty active
 items, each with Input `{ "ticketId": "<ticket ObjectId from tickets.csv>" }`.
 A JSON-encoded object or bare 24-character ticket-ID string is also accepted and
 normalized into that object locally. An exact integer is accepted only when its
@@ -294,9 +359,10 @@ Move-Item -LiteralPath .\agents\runs\experiments\10b882cfbaf14c69\baseline.json 
 Do not replace a baseline containing a completed comparison run to allow code or
 model changes between V1, V2 and V3. Complete a valid V1 before revising its prompt.
 
-## Connect the existing LLM judges
+## Existing LLM judge configuration (reference only)
 
-Keep the two judge definitions and their numeric rubrics. Map:
+The two existing judge definitions, numeric rubrics and mappings remain unchanged.
+This table records their current mapping; no setup or reconfiguration is required:
 
 | Variable | Observation source |
 | --- | --- |
@@ -309,10 +375,9 @@ identifiers and completion flags. These come from the local fixtures, not from
 the agent's summary or earlier analysis. Reference data is stored only in
 evaluation telemetry and is absent from agent-visible database tool responses.
 
-Use the rule Builder to target observation **Name = paperdesk-eval-case**.
-Use that name rather than relying on the default root-observation filter; this
-SDK task has a parent observation. Set sampling to **100%** and add these
-metadata filters:
+The existing rules target observation **Name = paperdesk-eval-case**, with
+**100%** sampling and these metadata filters. This SDK task has a parent
+observation, so the mapping uses its task name:
 
 | Judge | Required metadata filters |
 | --- | --- |
@@ -323,8 +388,8 @@ The flags deliberately contain strings, not JSON booleans. Failed analyses have
 `evaluation_ready=false`. When expected and returned team lists are both empty,
 `reason_applicable=false`, so reason quality is N/A. Unexpected teams on E09
 remain eligible for reason scoring. Both judges see the full response, including
-all returned team reasons. Select a completed experiment case to inspect the
-mapped previews and test your judges.
+all returned team reasons. Existing completed cases can be inspected to confirm
+the mapped context without invoking new analyses or changing judges.
 
 References: [SDK experiments](https://langfuse.com/docs/evaluation/experiments/experiments-via-sdk),
 [judge mappings and rules](https://langfuse.com/docs/evaluation/evaluation-methods/llm-as-a-judge),
@@ -335,12 +400,15 @@ References: [SDK experiments](https://langfuse.com/docs/evaluation/experiments/e
 Tests cover fixture/reference answers, failed and empty outputs, selection versus
 membership errors, inactive/unassigned users, duplicate IDs, schema violations,
 ID normalization, dataset mismatches, judge eligibility, and agent prompt
-overrides/defaults. They were prepared but have not been executed.
+overrides/defaults. Fixture checks also verify original-record preservation,
+expanded coverage, zero-active membership, malformed additions, local-only
+export, seeder isolation and repeat-seed preservation. The ticket 01 offline
+checks were executed; no live integrations or measured analyses were needed.
 
 If you choose to run those tests yourself, from the project root:
 
 ```powershell
-.\agents\.venv\Scripts\python.exe -m unittest agents.tests.test_experiments agents.tests.test_agent agents.tests.test_tracing
+.\agents\.venv\Scripts\python.exe -B -m unittest agents.tests.test_fixtures agents.tests.test_experiments agents.tests.test_agent agents.tests.test_tracing
 ```
 
 ## Branch command

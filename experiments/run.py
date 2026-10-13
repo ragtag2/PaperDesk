@@ -36,7 +36,7 @@ from agents.reporting import safe_error
 from agents.schemas import AnalyzeTicketRequest
 from agents.tracing import AnalysisTracing
 from experiments.evaluators import SCORE_NAMES, evaluate_result, reference_answer
-from experiments.seed import DATABASE_NAME, FIXTURE_DIR, TICKET_COLUMNS, load_fixture, read_rows
+from experiments.seed import DATABASE_NAME, FIXTURE_DIR, TICKET_COLUMNS, case_group, load_fixture, read_rows
 
 
 OBSERVATION_NAME = "paperdesk-eval-case"
@@ -61,12 +61,12 @@ def canonical_records(documents: list[dict]) -> list[dict]:
 def load_cases() -> tuple[dict, dict[str, dict], str]:
     # Reuse the seeder's validation and document conversion, without calling main().
     fixture = load_fixture()
-    rows = read_rows("tickets.csv", TICKET_COLUMNS, 10)
+    rows = read_rows("tickets.csv", TICKET_COLUMNS, len(fixture["tickets"]))
     tickets = {str(ticket["_id"]): serialize(ticket) for ticket in fixture["tickets"]}
     cases = {}
     for row in rows:
         cases[row["_id"]] = {
-            "case_id": row["case_id"], "coverage": row["coverage"],
+            "case_id": row["case_id"], "coverage": row["coverage"], "group": case_group(row["case_id"]),
             "ticket": {field: tickets[row["_id"]][field] for field in TICKET_TOOL_FIELDS},
             "required_summary_facts": json.loads(row["required_summary_facts_json"]),
             "required_reason_facts": json.loads(row["required_reason_facts_json"]),
@@ -82,8 +82,12 @@ def load_cases() -> tuple[dict, dict[str, dict], str]:
 def check_database(database, fixture: dict) -> None:
     for collection, documents in fixture.items():
         fields = {key: 1 for key in documents[0]}
+        if collection == "users":
+            # Login state is preserved by seeding and is not agent-visible evidence.
+            fields.pop("sessionVersion", None)
+        expected = [{key: document[key] for key in fields} for document in documents]
         actual = list(database[collection].find({}, fields))
-        if canonical_records(actual) != canonical_records(documents):
+        if canonical_records(actual) != canonical_records(expected):
             raise FixtureMismatchError(
                 f"{DATABASE_NAME}.{collection} differs from the CSV fixture. "
                 "Restore the intended fixture before running an experiment."
@@ -201,11 +205,11 @@ def prepare_dataset(dataset, cases: dict[str, dict], teams: list[dict], run_meta
             # The SDK propagates item metadata with a 200-character value limit.
             # Keep references here; make_task writes the full context directly
             # after the SDK has captured these small propagation attributes.
-            "metadata": {"case_id": case["case_id"], "coverage": case["coverage"],
+            "metadata": {"case_id": case["case_id"], "coverage": case["coverage"], "group": case["group"],
                          "evaluation_ready": "false", "reason_applicable": "false"},
         }))
     if seen != set(cases):
-        raise ValueError("The dataset must contain exactly the ten active fixture tickets.")
+        raise ValueError(f"The dataset must contain exactly the {len(cases)} active fixture tickets.")
     dataset.items = sorted(prepared, key=lambda item: item.metadata["case_id"])
     return contexts
 
@@ -364,7 +368,7 @@ def write_report(result, directory: Path, run_metadata: dict, items: list) -> tu
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run one full-agent round against the fixed paperdesk_eval fixture.")
-    parser.add_argument("--dataset", required=True, help="Name of the existing Langfuse dataset with ten fixture items.")
+    parser.add_argument("--dataset", required=True, help="Name of the existing Langfuse dataset matching the fixture cases.")
     parser.add_argument("--round", required=True, choices=("V1", "V2", "V3"))
     parser.add_argument("--run-name", required=True, help="A unique dataset run name, for example paperdesk-V1.")
     parser.add_argument("--prompt-name", help="Langfuse text prompt name; omit for V1's builtin baseline.")
@@ -425,7 +429,7 @@ def main() -> int:
 
             result = dataset.run_experiment(
                 name="Paperdesk ticket coordination", run_name=args.run_name,
-                description=f"{args.round}: ten frozen full-agent cases; review before the next round.",
+                description=f"{args.round}: {len(cases)} frozen full-agent cases; review before the next round.",
                 task=make_task(client, coordinator, database, fixture, args.interval_seconds, contexts=contexts),
                 evaluators=[deterministic_checks], max_concurrency=1, metadata=run_metadata,
             )
