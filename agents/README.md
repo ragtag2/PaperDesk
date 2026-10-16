@@ -26,7 +26,12 @@ FastAPI exposes `POST /analyze-ticket`. The caller supplies only:
 { "ticketId": "507f1f77bcf86cd799439011" }
 ```
 
-The agent retrieves context directly from MongoDB through three LangChain tools:
+The HTTP agent uses experiment E's tool/context profile. Python reads the current
+ticket and complete team directory from MongoDB before calling the model, then
+supplies both in the user message. The model has no database tools; it returns
+the structured `TeamAssessment` with a summary, relevant teams, and reasons.
+
+Python retains the three database tools for retrieval and stakeholder assembly:
 
 | Tool | Reads |
 | --- | --- |
@@ -34,8 +39,9 @@ The agent retrieves context directly from MongoDB through three LangChain tools:
 | `list_teams()` | Team IDs, names, and responsibilities |
 | `get_team_members(team_id)` | Active users belonging to a team |
 
-LangChain selects relevant teams and supplies a summary and reasons. Python then
-uses the member tool to build the stakeholder list from the selected teams.
+Python validates selected team IDs against the supplied directory and uses the
+member tool to include every active member of those teams, with deduplication.
+Each request reads fresh context, including any previous coordination result.
 
 Example response:
 
@@ -200,15 +206,22 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/analyze-ticket -Conten
 The normal HTTP service fetches the Langfuse **text** prompt
 `ticket-analysis-system` with the `production` label once during startup. It
 passes the compiled text and resolved version (for example
-`ticket-analysis-system@3`) to the existing coordinator. Model settings, database
-tools, stakeholder assembly and the HTTP result schema continue to come from
-the application code and environment. Langfuse prompt Config is not read.
+`ticket-analysis-system@3`) to the existing coordinator with profile **E**. The
+coordinator replaces only V3's recognized ticket/team retrieval sentence with
+instructions to use the supplied context and records the effective prompt hash.
+The coordination policy stays intact. A prompt without that recognized sentence
+stops startup; this prevents silently applying E to incompatible instructions.
+The hosted prompt and its labels are not modified. Model settings, Python
+database reads, stakeholder assembly and the HTTP result schema continue to come
+from the application code and environment. Langfuse prompt Config is not read.
 
 Assign `production` to the approved version in the Langfuse project used by the
 service, then restart it. Label changes are not fetched during ticket requests.
 The ready log, local analysis reports and Langfuse metadata record the actual
 version loaded. Rolling back follows the same process: move `production` to an
-earlier approved version and restart.
+earlier approved version compatible with profile E and restart. Restart or
+redeploy the agent service after updating this code; the ready log includes
+`tool profile E` when the new path is active.
 
 Service startup now requires `LANGFUSE_TRACING_ENABLED=true`, both Langfuse project
 keys, and a reachable endpoint serving that prompt. Disabled or missing tracing

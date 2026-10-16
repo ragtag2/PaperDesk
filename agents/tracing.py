@@ -146,6 +146,8 @@ class AnalysisTracing:
                     "analysisId": report.data["analysisId"],
                     "model": report.data["model"],
                     "promptVersion": prompt_version,
+                    **{key: report.data[key] for key in ("variant", "prompt_sha256", "profile_sha256")
+                       if key in report.data},
                 }
                 observation = stack.enter_context(self.client.start_as_current_observation(
                     name="ticket-analysis", as_type="agent",
@@ -172,7 +174,7 @@ class AnalysisTracing:
         finally:
             trace.update(
                 output=report.data["result"],
-                level="ERROR" if report.data["status"] == "failed" else "DEFAULT",
+                level="DEFAULT" if report.data["status"] == "passed" else "ERROR",
                 status_message=report.data.get("error"),
                 metadata={
                     "status": report.data["status"], "httpStatus": report.data["httpStatus"],

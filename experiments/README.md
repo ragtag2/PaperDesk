@@ -6,11 +6,11 @@ This folder contains the evaluation data, seed script, full-agent runner,
 deterministic evaluators and evaluation rules. Ticket 01 adds twenty cases,
 six teams and seventeen users to the original fixture. Every original case,
 reference, team and user record remains unchanged, including memberships.
-The expanded local fixture has been checked offline; no expanded seed,
-Langfuse import, evaluator reconfiguration or measured analysis was performed.
+The expanded fixture was seeded into `paperdesk_eval` and verified on 2026-10-13.
+No Langfuse import, evaluator reconfiguration or measured study was performed.
 
-The existing runner can load the expanded fixture. Explicit A-E variants and
-separate study provenance belong to ticket 02 and are not implemented yet.
+The runner supports A-E variants, a separate study manifest, prerequisite checks,
+and explicit failed/missing records. Follow the [manual study guide](TOOL_EVALUATION_GUIDE.md).
 The V1/V2/V3 commands below document the historical pilot, not instructions to
 start the new study. Keep the new twenty cases out of prompt tuning and preserve
 the existing pilot reports/baseline. The user imports new Langfuse items and runs
@@ -31,7 +31,8 @@ credential stays in the local environment; it is not experiment metadata.
 | `tickets.csv` | Thirty tickets with reference answers, required facts and evaluation notes; the original ten rows are unchanged. |
 | `seed.py` | Shared validation, local-only validation/export, and explicit seeding of the fixed `paperdesk_eval` database. |
 | `import_directory.py` | Import only fixture teams/users into `paperdesk`, preserving Akrem/Rayen and existing tickets. |
-| `run.py` | Manually run one full-agent V1, V2 or V3 round linked to a Langfuse dataset. |
+| `run.py` | Check study prerequisites or manually run one A-E variant; historical V1/V2/V3 mode remains separate. |
+| `TOOL_EVALUATION_GUIDE.md` | User-managed dataset import, prerequisite check, and five explicit run commands. |
 | `check_model.py` | Manually isolate model endpoint, token-parameter and initial tool-call failures without database or experiment calls. |
 | `evaluators.py` | Five independent deterministic score functions. |
 | `requirements.txt` | Seed and runner dependencies, including the agent requirements. |
@@ -130,7 +131,8 @@ nor export creates or edits hosted items.
 The existing experiment database was seeded with the original fixture. Preparing
 the expanded database is a separate explicit action; local CSV changes do not
 update it. Validate first, then seed only when ready to restore the evaluation
-records. The assistant has not executed the seed command for this expansion.
+records. The expanded seed was executed and verified on 2026-10-13; this is not
+a prerequisite to repeat before each variant.
 Use Python 3.11 or newer. From the project root, using the existing agent virtual
 environment in PowerShell:
 
@@ -213,7 +215,7 @@ output; the ticket ID alone does not provide enough judging context.
 
 Follow the existing `EVALUATION_RULES.md` for scoring semantics. The pilot's
 V1/V2/V3 tuning sequence is historical. The expanded study fixes V3 and compares
-A-E once each; its variant commands will be delivered in ticket 02. Langfuse
+A-E once each; its variant commands are in [the study guide](TOOL_EVALUATION_GUIDE.md). Langfuse
 dataset import and measured execution remain user-managed.
 
 ## Historical prompt-round runner (reference only)

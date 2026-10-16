@@ -49,10 +49,11 @@ def create_app(coordinator: IncidentCoordinator | None = None) -> FastAPI:
                 tracing=tracing,
                 system_prompt=prompt.compile(),
                 prompt_version=f"ticket-analysis-system@{prompt.version}",
+                variant="E",
             )
             logger.info(
-                "Agent ready with model %s and prompt %s.",
-                settings.model, app.state.coordinator.prompt_version,
+                "Agent ready with model %s, prompt %s and tool profile %s.",
+                settings.model, app.state.coordinator.prompt_version, app.state.coordinator.variant.name,
             )
             yield
         finally:

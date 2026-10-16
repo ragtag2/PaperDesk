@@ -14,15 +14,18 @@ import re
 import sys
 from copy import deepcopy
 from dataclasses import replace
+from difflib import unified_diff
 from datetime import datetime, timezone
 from hashlib import sha256
 from importlib.metadata import version
 from pathlib import Path
 from time import perf_counter, sleep
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
 from pydantic import ValidationError
+from pymongo.errors import PyMongoError
 
 # Support both `python -m experiments.run` and `python experiments/run.py`.
 if __package__ in (None, ""):
@@ -35,6 +38,8 @@ from agents.model import create_model
 from agents.reporting import safe_error
 from agents.schemas import AnalyzeTicketRequest
 from agents.tracing import AnalysisTracing
+from agents.tools import create_database_tools
+from agents.variants import VARIANTS
 from experiments.evaluators import SCORE_NAMES, evaluate_result, reference_answer
 from experiments.seed import DATABASE_NAME, FIXTURE_DIR, TICKET_COLUMNS, case_group, load_fixture, read_rows
 
@@ -44,7 +49,7 @@ REPORT_DIRECTORY = FIXTURE_DIR.parent / "agents" / "runs" / "experiments"
 TICKET_TOOL_FIELDS = ("_id", "title", "description", "category", "priority", "status", "coordination")
 FIXED_CODE_FILES = (
     "agents/agent.py", "agents/config.py", "agents/database.py", "agents/model.py",
-    "agents/tools.py", "agents/schemas.py", "agents/tracing.py", "agents/reporting.py",
+    "agents/tools.py", "agents/schemas.py", "agents/tracing.py", "agents/reporting.py", "agents/variants.py",
     "agents/requirements.txt", "experiments/run.py", "experiments/evaluators.py",
     "experiments/seed.py", "experiments/EVALUATION_RULES.md", "experiments/requirements.txt",
 )
@@ -267,8 +272,68 @@ def preserve_baseline(directory: Path, round_name: str, configuration: dict) -> 
         path.write_text(json.dumps(configuration, indent=2) + "\n", encoding="utf-8")
 
 
+def study_configuration(settings: Settings, fixture_hash: str, base_prompt: str, dataset, cases: dict,
+                        *, dataset_name: str, dataset_version: str | None, study: str,
+                        interval_seconds: float, database: MongoDatabase) -> dict:
+    tools = {tool.name: tool for tool in create_database_tools(database)}
+    profiles = {}
+    for name, profile in VARIANTS.items():
+        instructions = profile.instructions(base_prompt)
+        profiles[name] = {
+            **profile.metadata(base_prompt), "instructions": instructions,
+            "retrieval_diff": "".join(unified_diff(base_prompt.splitlines(keepends=True),
+                                                   instructions.splitlines(keepends=True),
+                                                   fromfile="V3", tofile=name)),
+            "tool_schemas": [tools[tool].tool_call_schema.model_json_schema() for tool in profile.tools],
+        }
+    items = [{"dataset_item_id": item.id, "dataset_id": item.dataset_id,
+              "input": item.input, "expected_output": item.expected_output}
+             for item in dataset.items]
+    return {
+        **fixed_configuration(settings, fixture_hash), "study_id": study,
+        "prompt_name": "ticket-analysis-system", "prompt_version": 3,
+        "base_prompt": base_prompt, "base_prompt_sha256": sha256(base_prompt.encode("utf-8")).hexdigest(),
+        "profiles": profiles, "dataset_id": dataset.id, "dataset_name": dataset_name,
+        "langfuse_base_url": settings.langfuse_base_url, "langfuse_environment": settings.langfuse_environment,
+        "dataset_version": dataset_version,
+        "dataset_sha256": sha256(json.dumps(items, sort_keys=True).encode("utf-8")).hexdigest(),
+        "cases": [{"case_id": cases[item.input["ticketId"]]["case_id"],
+                   "group": cases[item.input["ticketId"]]["group"],
+                   "ticket_id": item.input["ticketId"], "dataset_item_id": item.id} for item in dataset.items],
+        "interval_seconds": interval_seconds, "max_concurrency": 1,
+        "planned_variants": list(VARIANTS), "cases_per_variant": len(cases),
+        "automatic_retries": False,
+        "judges": "Existing hosted evaluators unchanged; asynchronous scores remain pending until imported.",
+    }
+
+
+def preserve_study(directory: Path, variant: str, configuration: dict) -> None:
+    path = directory / "manifest.json"
+    if path.exists():
+        if json.loads(path.read_text(encoding="utf-8")) != configuration:
+            raise ValueError("Inputs, settings or profiles differ from the frozen study manifest.")
+    elif variant != "A":
+        raise ValueError("Prepare variant A first to freeze the study manifest.")
+    else:
+        directory.mkdir(parents=True, exist_ok=True)
+        with path.open("x", encoding="utf-8") as handle:
+            handle.write(json.dumps(configuration, indent=2, ensure_ascii=False) + "\n")
+
+
+def claim_study_run(directory: Path, variant: str, run_name: str) -> None:
+    for attempt in directory.glob("attempt-*.json"):
+        if json.loads(attempt.read_text(encoding="utf-8"))["run_name"] == run_name:
+            raise ValueError("This run name already has a study attempt; inspect its report before planning another execution.")
+    try:
+        with (directory / f"attempt-{variant}.json").open("x", encoding="utf-8") as handle:
+            json.dump({"variant": variant, "run_name": run_name,
+                       "started_at": datetime.now(timezone.utc).isoformat()}, handle, indent=2)
+    except FileExistsError as error:
+        raise ValueError("This variant already has a study attempt; automatic replacement is not allowed.") from error
+
+
 def make_task(client, coordinator, database, fixture: dict, interval_seconds: float,
-              *, contexts: dict[str, dict] | None = None):
+              *, contexts: dict[str, dict] | None = None, records: dict[str, dict] | None = None):
     last_started = None
 
     def task(*, item, **_kwargs):
@@ -276,6 +341,12 @@ def make_task(client, coordinator, database, fixture: dict, interval_seconds: fl
         metadata = item.metadata
         if contexts is not None:
             metadata.update(deepcopy(contexts[item.input["ticketId"]]))
+        try:
+            task_id = client.get_current_observation_id()
+            if isinstance(task_id, str):
+                metadata["task_observation_id"] = task_id
+        except Exception as error:
+            metadata["task_linkage_error"] = safe_error(error)
         client.update_current_span(
             name=OBSERVATION_NAME, version=coordinator.prompt_version, metadata=metadata,
         )
@@ -284,7 +355,10 @@ def make_task(client, coordinator, database, fixture: dict, interval_seconds: fl
         try:
             check_database(database, fixture)
         except Exception as error:
-            metadata.update({"infrastructure_error": safe_error(error), "execution_status": "infrastructure_error"})
+            metadata.update({"infrastructure_error": safe_error(error), "execution_status": "infrastructure_error",
+                             "error_stage": "fixture_preflight", "error_type": type(error).__name__})
+            if records is not None:
+                records[item.id] = {"output": None, "metadata": deepcopy(metadata)}
             client.update_current_span(metadata=metadata, level="ERROR", status_message=safe_error(error))
             raise
         if last_started is not None:
@@ -292,29 +366,51 @@ def make_task(client, coordinator, database, fixture: dict, interval_seconds: fl
         last_started = perf_counter()
         started = perf_counter()
         result = None
+        analysis_report = {}
+        analysis_finished = None
         try:
-            result = coordinator.analyze(item.input["ticketId"]).model_dump(mode="json")
-        except FixtureMismatchError as error:
-            metadata["infrastructure_error"] = safe_error(error)
+            result = coordinator.analyze(item.input["ticketId"], report_callback=analysis_report.update).model_dump(mode="json")
+            analysis_finished = perf_counter()
+            # Audit after completion too, including cached preloads and the final case.
+            # This is outside the measured analysis interval.
+            check_database(database, fixture)
+        except (FixtureMismatchError, PyMongoError) as error:
+            metadata.update({"infrastructure_error": safe_error(error),
+                             "error_stage": "post_analysis_fixture" if analysis_finished is not None else "runtime_fixture",
+                             "error_type": type(error).__name__})
             client.update_current_span(metadata=metadata, level="ERROR", status_message=safe_error(error))
             raise
         except Exception as error:
             # Returning None lets the SDK run all five deterministic checks even
             # for failed analyses; nonexistent outputs are ineligible for judges.
-            metadata["execution_error"] = safe_error(error)
+            metadata.update({"execution_error": safe_error(error), "error_stage": "analysis",
+                             "error_type": type(error).__name__})
+        except BaseException as error:
+            metadata.update({"execution_error": safe_error(error), "execution_status": "interrupted",
+                             "error_stage": "analysis", "error_type": type(error).__name__})
+            raise
         finally:
-            metadata["analysis_seconds"] = round(perf_counter() - started, 3)
+            if analysis_report:
+                metadata.update({"analysis_id": analysis_report["analysisId"],
+                                 "analysis_report_path": analysis_report["report_path"],
+                                 "analysis_trace_id": analysis_report.get("langfuseTraceId"),
+                                 "analysis_metrics": analysis_report["metrics"]})
+            metadata["analysis_seconds"] = round((analysis_finished if analysis_finished is not None else perf_counter()) - started, 3)
             metadata["execution_status"] = (
                 "infrastructure_error" if "infrastructure_error" in metadata
+                else "interrupted" if metadata.get("execution_status") == "interrupted"
                 else "passed" if result is not None else "failed"
             )
-            metadata["evaluation_ready"] = "true" if result is not None else "false"
-            metadata["reason_applicable"] = "true" if result is not None and (
+            eligible = metadata["execution_status"] == "passed"
+            metadata["evaluation_ready"] = "true" if eligible else "false"
+            metadata["reason_applicable"] = "true" if eligible and (
                 result["relevantTeams"] or metadata["expected_answer"]["relevantTeams"]
             ) else "false"
+            if records is not None:
+                records[item.id] = {"output": result, "metadata": deepcopy(metadata)}
             client.update_current_span(
                 metadata=metadata, output=result,
-                level="DEFAULT" if result is not None else "ERROR",
+                level="DEFAULT" if eligible else "ERROR",
                 status_message=metadata.get("execution_error") or metadata.get("infrastructure_error"),
             )
         return result
@@ -322,27 +418,39 @@ def make_task(client, coordinator, database, fixture: dict, interval_seconds: fl
     return task
 
 
-def write_report(result, directory: Path, run_metadata: dict, items: list) -> tuple[Path, bool]:
+def write_report(result, directory: Path, run_metadata: dict, items: list,
+                 *, task_records: dict[str, dict] | None = None) -> tuple[Path, bool]:
     expected_count = len(items)
     records = []
+    expected = {item.id: item for item in items}
+    results = {}
     for item_result in result.item_results:
-        records.append({
-            "case_id": item_result.item.metadata["case_id"],
-            "input": item_result.item.input, "metadata": item_result.item.metadata,
-            "output": item_result.output, "trace_id": item_result.trace_id,
-            "dataset_run_id": item_result.dataset_run_id,
+        item_id = item_result.item.id
+        if item_id not in expected or item_id in results or item_result.item.input != expected[item_id].input:
+            raise ValueError("SDK results contain an unknown, duplicate or mismatched dataset item.")
+        results[item_id] = item_result
+    for item in items:
+        item_result = results.get(item.id)
+        task_record = (task_records or {}).get(item.id, {})
+        metadata = deepcopy(task_record.get("metadata", item_result.item.metadata if item_result is not None else item.metadata))
+        output = item_result.output if item_result is not None else task_record.get("output")
+        record = {
+            "case_id": item.metadata["case_id"], "dataset_item_id": item.id,
+            "group": item.metadata["group"], "variant": run_metadata.get("variant"),
+            "input": item.input, "metadata": metadata, "output": output,
+            "execution_status": metadata.get("execution_status", "passed" if output is not None
+                                              else "failed" if item_result is not None else "missing"),
+            "analysis_id": metadata.get("analysis_id"), "analysis_report_path": metadata.get("analysis_report_path"),
+            "trace_id": item_result.trace_id if item_result is not None else metadata.get("analysis_trace_id"),
+            "dataset_run_id": item_result.dataset_run_id if item_result is not None else None,
             "scores": [{"name": evaluation.name, "value": evaluation.value,
                         "comment": evaluation.comment, "details": evaluation.metadata}
-                       for evaluation in item_result.evaluations],
-        })
-    completed = {record["case_id"] for record in records}
-    for item in items:
-        if item.metadata["case_id"] not in completed:
-            records.append({
-                "case_id": item.metadata["case_id"], "input": item.input, "metadata": item.metadata,
-                "output": None, "trace_id": None, "dataset_run_id": None, "scores": [],
-                "sdk_task_error": item.metadata.get("infrastructure_error") or "The SDK did not return this case.",
-            })
+                       for evaluation in item_result.evaluations] if item_result is not None else [],
+        }
+        if item_result is None:
+            record["sdk_task_error"] = metadata.get("infrastructure_error") or "The SDK did not return this case."
+        records.append(record)
+    completed = set(results)
     records.sort(key=lambda record: record["case_id"])
     incomplete = len(completed) != expected_count or any(
         {evaluation["name"] for evaluation in record["scores"]} != set(SCORE_NAMES)
@@ -366,21 +474,33 @@ def write_report(result, directory: Path, run_metadata: dict, items: list) -> tu
     return path, incomplete
 
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Run one full-agent round against the fixed paperdesk_eval fixture.")
     parser.add_argument("--dataset", required=True, help="Name of the existing Langfuse dataset matching the fixture cases.")
-    parser.add_argument("--round", required=True, choices=("V1", "V2", "V3"))
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--round", choices=("V1", "V2", "V3"), help="Historical pilot mode.")
+    selection.add_argument("--variant", choices=tuple(VARIANTS), help="Select the model's tool/context profile.")
+    parser.add_argument("--study", help="Stable study ID shared by A-E, separate from the pilot baseline.")
+    parser.add_argument("--check-only", action="store_true", help="Validate/freeze study prerequisites without constructing a model or running cases.")
     parser.add_argument("--run-name", required=True, help="A unique dataset run name, for example paperdesk-V1.")
     parser.add_argument("--prompt-name", help="Langfuse text prompt name; omit for V1's builtin baseline.")
     parser.add_argument("--prompt-version", type=int, help="Pinned numeric version; required with --prompt-name.")
     parser.add_argument("--dataset-version", help="Optional frozen dataset timestamp, such as 2026-10-08T20:00:00Z.")
     parser.add_argument("--interval-seconds", type=float, default=25,
                         help="Minimum time between case starts (default 25); no automatic model retries.")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if not args.dataset.strip() or not args.run_name.strip():
         parser.error("Dataset and run names must be nonempty.")
     if not math.isfinite(args.interval_seconds) or args.interval_seconds < 0:
         parser.error("--interval-seconds must be finite and nonnegative.")
+    if args.variant:
+        if not args.study or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}", args.study) is None:
+            parser.error("--variant requires --study with 1-64 letters, digits, underscores or hyphens.")
+        if args.prompt_name not in (None, "ticket-analysis-system") or args.prompt_version not in (None, 3):
+            parser.error("A-E use the existing ticket-analysis-system prompt at version 3.")
+        args.prompt_name, args.prompt_version = "ticket-analysis-system", 3
+    elif args.study or args.check_only:
+        parser.error("--study and --check-only require --variant.")
     return args
 
 
@@ -405,11 +525,15 @@ def main() -> int:
         dataset = client.get_dataset(args.dataset, version=dataset_version)
         configuration = fixed_configuration(settings, fixture_hash)
         run_metadata = {
-            **configuration, **prompt_metadata, "round": args.round,
+            **configuration, **prompt_metadata, "round": args.round or args.variant,
             "prompt_sha256": sha256(instructions.encode("utf-8")).hexdigest(),
-            "dataset_name": args.dataset, "dataset_version": dataset_version.isoformat() if dataset_version else None,
+            "dataset_id": dataset.id, "dataset_name": args.dataset,
+            "dataset_version": dataset_version.isoformat() if dataset_version else None,
             "interval_seconds": args.interval_seconds,
         }
+        if args.variant:
+            run_metadata.update({"study_id": args.study, "variant": args.variant,
+                                 "run_name": args.run_name, **VARIANTS[args.variant].metadata(instructions)})
         teams = [{key: serialize(team[key]) for key in ("_id", "name", "responsibilities")}
                  for team in fixture["teams"]]
         contexts = prepare_dataset(dataset, cases, teams, run_metadata)
@@ -417,23 +541,55 @@ def main() -> int:
         with create_mongo_client(settings) as mongo:
             database = mongo[DATABASE_NAME]
             check_database(database, fixture)
-            preserve_baseline(directory, args.round, configuration)
+            frozen_database = FrozenMongoDatabase(database, fixture, cases)
+            if args.variant:
+                directory = REPORT_DIRECTORY / "tool-evaluation" / args.study
+                manifest = study_configuration(
+                    settings, fixture_hash, instructions, dataset, cases, dataset_name=args.dataset,
+                    dataset_version=run_metadata["dataset_version"], study=args.study,
+                    interval_seconds=args.interval_seconds, database=frozen_database,
+                )
+                preserve_study(directory, args.variant, manifest)
+                run_metadata.update({
+                    "manifest_sha256": sha256(json.dumps(manifest, sort_keys=True).encode("utf-8")).hexdigest(),
+                    "dataset_sha256": manifest["dataset_sha256"],
+                    "base_prompt_sha256": manifest["base_prompt_sha256"],
+                })
+                for context in contexts.values():
+                    context.update(deepcopy(run_metadata))
+                if args.check_only:
+                    print(f"Checked {len(cases)} cases and A-E profiles. Frozen manifest: {directory / 'manifest.json'}")
+                    print("No model was constructed and no experiment was run.")
+                    return 0
+            else:
+                preserve_baseline(directory, args.round, configuration)
             coordinator = IncidentCoordinator(
-                FrozenMongoDatabase(database, fixture, cases), create_model(settings),
+                frozen_database, create_model(settings),
                 model_name=settings.model, tracing=tracing,
-                system_prompt=instructions, prompt_version=prompt_id,
+                system_prompt=instructions, prompt_version=prompt_id, variant=args.variant,
             )
 
             def deterministic_checks(**values):
                 return evaluate_result(**values, teams=teams, users=serialize(fixture["users"]))
 
-            result = dataset.run_experiment(
-                name="Paperdesk ticket coordination", run_name=args.run_name,
-                description=f"{args.round}: {len(cases)} frozen full-agent cases; review before the next round.",
-                task=make_task(client, coordinator, database, fixture, args.interval_seconds, contexts=contexts),
-                evaluators=[deterministic_checks], max_concurrency=1, metadata=run_metadata,
-            )
-            path, incomplete = write_report(result, directory, run_metadata, dataset.items)
+            if args.variant:
+                claim_study_run(directory, args.variant, args.run_name)
+            task_records = {}
+            try:
+                result = dataset.run_experiment(
+                    name="Paperdesk ticket coordination", run_name=args.run_name,
+                    description=f"{args.variant or args.round}: {len(cases)} frozen full-agent cases.",
+                    task=make_task(client, coordinator, database, fixture, args.interval_seconds,
+                                   contexts=contexts, records=task_records),
+                    evaluators=[deterministic_checks], max_concurrency=1, metadata=run_metadata,
+                )
+            except BaseException as error:
+                run_metadata["run_error"] = safe_error(error)
+                partial = SimpleNamespace(run_name=args.run_name, dataset_run_url=None, item_results=[])
+                path, _ = write_report(partial, directory, run_metadata, dataset.items, task_records=task_records)
+                print(f"Interrupted/failed run retained without retries: {path}")
+                raise
+            path, incomplete = write_report(result, directory, run_metadata, dataset.items, task_records=task_records)
             print(f"Local report: {path}")
             if result.dataset_run_url:
                 print(f"Langfuse experiment: {result.dataset_run_url}")

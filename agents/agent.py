@@ -2,9 +2,11 @@
 
 import json
 import logging
+from copy import deepcopy
 from datetime import datetime, timezone
 from hashlib import sha256
 from time import perf_counter
+from typing import Callable
 
 from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
@@ -17,6 +19,7 @@ from .reporting import AnalysisMetrics, AnalysisReport, safe_error
 from .schemas import CoordinationResult, TeamAssessment
 from .tools import create_database_tools
 from .tracing import AnalysisTrace, AnalysisTracing
+from .variants import get_variant
 
 
 logger = logging.getLogger(__name__)
@@ -39,12 +42,16 @@ to include every active member of each selected team as a stakeholder.
 class IncidentCoordinator:
     def __init__(self, database: MongoDatabase, model: str | BaseChatModel, *, model_name: str | None = None,
                  tracing: AnalysisTracing | None = None, system_prompt: str | None = None,
-                 prompt_version: str | None = None):
+                 prompt_version: str | None = None, variant: str | None = None):
         instructions = SYSTEM_PROMPT if system_prompt is None else system_prompt
         if not isinstance(instructions, str) or not instructions.strip():
             raise ValueError("The system prompt must be nonempty text.")
         if prompt_version is not None and (not isinstance(prompt_version, str) or not prompt_version.strip()):
             raise ValueError("The prompt version must be nonempty text.")
+        self.variant = get_variant(variant) if variant is not None else None
+        self.variant_metadata = self.variant.metadata(instructions) if self.variant else None
+        if self.variant:
+            instructions = self.variant.instructions(instructions)
         self.model_name = model_name or (model if isinstance(model, str) else getattr(model, "model_name", type(model).__name__))
         self.prompt_hash = sha256(instructions.encode("utf-8")).hexdigest()
         self.prompt_version = self.prompt_hash if prompt_version is None else prompt_version
@@ -54,16 +61,19 @@ class IncidentCoordinator:
         }
         self.agent = create_agent(
             model=model,
-            tools=list(self.tools.values()),
+            tools=[self.tools[name] for name in self.variant.tools] if self.variant else list(self.tools.values()),
             system_prompt=instructions,
             response_format=ToolStrategy(TeamAssessment, handle_errors=False),
         )
 
-    def analyze(self, ticket_id: str) -> CoordinationResult:
+    def analyze(self, ticket_id: str, *, report_callback: Callable[[dict], None] | None = None) -> CoordinationResult:
         ticket_id = ticket_id.lower()
         started = perf_counter()
         report = AnalysisReport(ticket_id, self.model_name)
         report.data["promptVersion"] = self.prompt_version
+        report.data["prompt_sha256"] = self.prompt_hash
+        if self.variant_metadata:
+            report.data.update({"variant": self.variant.name, **self.variant_metadata})
         metrics = AnalysisMetrics()
         result = None
         with self.tracing.analysis(report, self.prompt_version) as trace:
@@ -78,6 +88,9 @@ class IncidentCoordinator:
                 http_status = 404 if isinstance(error, TicketNotFoundError) else 503 if isinstance(error, PyMongoError) else 502
                 report.data.update({"status": "failed", "httpStatus": http_status, "error": safe_error(error)})
                 raise
+            except BaseException as error:
+                report.data.update({"status": "interrupted", "error": safe_error(error)})
+                raise
             finally:
                 elapsed = perf_counter() - started
                 report.data.update({
@@ -86,6 +99,11 @@ class IncidentCoordinator:
                     "metrics": metrics.snapshot(ticket_id, elapsed, result),
                 })
                 report.save()
+                if report_callback is not None:
+                    try:
+                        report_callback({**deepcopy(report.data), "report_path": str(report.path)})
+                    except Exception as error:
+                        logger.warning("Could not attach analysis report: %s", safe_error(error))
                 logger.info("Analysis %s %s", "completed" if result else "failed", json.dumps({
                     **report.data["metrics"], "report": str(report.path),
                 }))
@@ -94,12 +112,24 @@ class IncidentCoordinator:
         # Check existence before invoking the model, so missing tickets are 404s.
         ticket = self.tools["get_ticket"].invoke({"ticket_id": ticket_id}, config=config)
         report.data["ticketTitle"] = ticket["title"]
+        directory = None
+        content = f"Analyze ticket {ticket_id} using the database tools."
+        if self.variant:
+            context = {}
+            if self.variant.preload_ticket:
+                context["ticket"] = ticket
+            if self.variant.preload_directory:
+                directory = self.tools["list_teams"].invoke({}, config=config)
+                context["teams"] = directory
+            content = f"Analyze ticket {ticket_id}."
+            if context:
+                content += "\n\nSupplied database context:\n" + json.dumps(context, ensure_ascii=False)
         state = self.agent.invoke(
             {
                 "messages": [
                     {
                         "role": "user",
-                        "content": f"Analyze ticket {ticket_id} using the database tools.",
+                        "content": content,
                     }
                 ]
             },
@@ -107,9 +137,9 @@ class IncidentCoordinator:
         )
         assessment = TeamAssessment.model_validate(state["structured_response"])
         with trace.step("validate-selected-teams", input=assessment.model_dump(mode="json")) as validation:
-            known_team_ids = {
-                team["_id"] for team in self.tools["list_teams"].invoke({}, config=config)
-            }
+            if directory is None:
+                directory = self.tools["list_teams"].invoke({}, config=config)
+            known_team_ids = {team["_id"] for team in directory}
             report.data["teamCount"] = len(known_team_ids)
             seen_team_ids: set[str] = set()
             relevant_teams = []
